@@ -109,13 +109,28 @@ describe('desktop management workflows', () => {
     expect(await screen.findByRole('dialog', { name: '更新管理器' })).toBeInTheDocument();
   });
 
-  it('offers a first install when no installation exists', async () => {
-    const api = createApi({ ...structuredClone(previewSnapshot), installations: [] });
+  it('offers one-click setup when no terminal-usable installation exists', async () => {
+    const snapshot = structuredClone(previewSnapshot);
+    snapshot.installations = [{ ...snapshot.installations[1], id: 'ide-cli', source: 'external', capabilities: { upgrade: false, installVersion: false, uninstall: false } }];
+    snapshot.checks.push({ id: 'claude-desktop', title: 'Claude 桌面应用', level: 'info', message: '检测到 Claude 桌面应用内置的 Claude Code 2.1.325。' });
+    const api = createApi(snapshot);
     const user = userEvent.setup();
     render(<App api={api} />);
-    await user.click(await screen.findByRole('button', { name: '安装 Claude Code' }));
-    expect(api.createPlan).toHaveBeenCalledWith({ kind: 'install', installationId: undefined, targetVersion: '2.1.320' });
+    await user.click(await screen.findByRole('button', { name: '一键自动管理' }));
+    expect(screen.getByText(/检测到 Claude 桌面应用内置的 Claude Code 2.1.325/)).toBeInTheDocument();
+    expect(api.createPlan).toHaveBeenCalledWith({ kind: 'setup', targetVersion: '2.1.320' });
     expect(api.executePlan).not.toHaveBeenCalled();
+  });
+
+  it('offers a PATH-only setup when the native install is not reachable from terminals', async () => {
+    const snapshot = structuredClone(previewSnapshot);
+    snapshot.installations = snapshot.installations.map((item) => ({ ...item, active: false }));
+    const api = createApi(snapshot);
+    const user = userEvent.setup();
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '一键修复' }));
+    expect(api.createPlan).toHaveBeenCalledWith({ kind: 'setup' });
+    expect(screen.queryByRole('button', { name: '一键自动管理' })).not.toBeInTheDocument();
   });
 
   it('offers reinstall for an existing Native executable with an unreadable version', async () => {

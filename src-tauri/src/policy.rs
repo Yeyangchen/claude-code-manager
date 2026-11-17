@@ -1,4 +1,4 @@
-use crate::{platform, storage};
+use crate::{platform, process, storage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -89,6 +89,12 @@ fn settings_path() -> Result<PathBuf, String> {
         return fs::canonicalize(&path).map_err(|error| format!("无法解析配置文件路径：{error}"));
     }
     Ok(path)
+}
+
+/// `settings_path` is canonical only once the file exists. A change recorded
+/// before the manager created settings.json must still match it afterwards.
+fn same_settings_file(current: &Path, recorded: &str) -> bool {
+    process::equivalent(&current.to_string_lossy(), recorded)
 }
 
 fn managed_paths() -> Vec<PathBuf> {
@@ -423,7 +429,7 @@ fn records_dir(data_dir: &Path) -> PathBuf {
 
 pub fn apply_policy(data_dir: &Path, change: &PolicyChange) -> Result<PolicyChange, String> {
     let path = settings_path()?;
-    if path != Path::new(&change.settings_path) {
+    if !same_settings_file(&path, &change.settings_path) {
         return Err("配置目录发生变化，请重新检测".into());
     }
     if storage::file_fingerprint(&path)? != change.expected_fingerprint {
@@ -476,7 +482,7 @@ pub fn preview_restore(data_dir: &Path, id: &str) -> Result<PolicyChange, String
     if !["prepared", "applied"].contains(&record.state.as_str()) {
         return Err("该策略变更已经撤销".into());
     }
-    if settings_path()? != Path::new(&record.settings_path) {
+    if !same_settings_file(&settings_path()?, &record.settings_path) {
         return Err("该变更属于不同的 Claude 配置目录".into());
     }
     let current = read_settings(Path::new(&record.settings_path))?;
@@ -577,6 +583,21 @@ mod tests {
         assert!(
             verify_restorable(&json!({"minimumVersion":"2.1.1", "model":"new"}), &fields).is_ok()
         );
+    }
+
+    #[test]
+    fn settings_file_created_after_recording_still_matches() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let recorded = path.to_string_lossy().into_owned();
+        fs::write(&path, b"{}").unwrap();
+        let canonical = fs::canonicalize(&path).unwrap();
+        // Windows canonical paths carry the \\?\ prefix, unlike the recorded path.
+        #[cfg(windows)]
+        assert_ne!(canonical.to_string_lossy(), recorded);
+        assert!(same_settings_file(&canonical, &recorded));
+        let other = directory.path().join("other").join("settings.json");
+        assert!(!same_settings_file(&canonical, &other.to_string_lossy()));
     }
 
     #[test]

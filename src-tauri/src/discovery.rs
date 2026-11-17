@@ -318,6 +318,17 @@ pub fn scan() -> Result<Discovery, String> {
             ));
         }
     }
+    // Claude Desktop ships a private CLI for its own Code tab. It is not on
+    // PATH and is never managed here, but reporting it explains why a machine
+    // with Claude Desktop still has no terminal-usable Claude Code.
+    if let Some(version) = desktop_bundled_versions(&desktop_bundle_roots()).pop() {
+        checks.push(check(
+            "claude-desktop",
+            "Claude 桌面应用",
+            "info",
+            &format!("检测到 Claude 桌面应用内置的 Claude Code {version}。它只供桌面应用自身使用，不在终端 PATH 中，管理器不会修改它；在终端使用 claude 需要另外安装。"),
+        ));
+    }
     if let Ok(output) = process::ps_capture("Get-ExecutionPolicy") {
         let execution_policy = match output.stdout.trim() {
             "" => "无法读取执行策略",
@@ -347,6 +358,53 @@ pub fn scan() -> Result<Discovery, String> {
         shells,
         checks,
     })
+}
+
+/// `claude-code` folders that Claude Desktop uses for its bundled CLI: the
+/// MSIX package data directory and the classic per-user application data.
+fn desktop_bundle_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        if let Ok(entries) = std::fs::read_dir(PathBuf::from(local).join("Claude-Data")) {
+            roots.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path().join("claude-code")),
+            );
+        }
+    }
+    if let Some(roaming) = std::env::var_os("APPDATA") {
+        roots.push(PathBuf::from(roaming).join("Claude").join("claude-code"));
+    }
+    roots
+}
+
+/// Versions (ascending) that contain a claude.exe directly or one level down.
+fn desktop_bundled_versions(roots: &[PathBuf]) -> Vec<String> {
+    let mut versions = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let directory = entry.path();
+            let Ok(version) = semver::Version::parse(&entry.file_name().to_string_lossy()) else {
+                continue;
+            };
+            let has_binary = directory.join("claude.exe").is_file()
+                || std::fs::read_dir(&directory).is_ok_and(|children| {
+                    children
+                        .flatten()
+                        .any(|child| child.path().join("claude.exe").is_file())
+                });
+            if has_binary {
+                versions.push(version);
+            }
+        }
+    }
+    versions.sort();
+    versions.dedup();
+    versions.into_iter().map(|v| v.to_string()).collect()
 }
 
 fn check(id: &str, title: &str, level: &str, message: &str) -> Check {
@@ -663,6 +721,18 @@ fn running_from_json(text: &str, installation: Option<&Installation>) -> Result<
         Value::Array(a) => a,
         _ => return Err("运行进程检测结果格式无效，不能安全开始操作".into()),
     };
+    // `None` is a fresh native installation. Only processes that can belong to
+    // the target source block an operation: Node sessions matter for npm only,
+    // and claude.exe images elsewhere (IDE extensions, desktop apps, other
+    // sources) do not use the files being replaced.
+    let targets_npm = installation.is_some_and(|i| i.source == Source::Npm);
+    let home = platform::user_home().ok();
+    let in_native_tree = |path: &str| {
+        home.as_ref().is_some_and(|home| {
+            process::equivalent(path, &home.join(".local/bin/claude.exe").to_string_lossy())
+                || path_within(path, &home.join(".local/share/claude"))
+        })
+    };
     let mut running = Vec::new();
     for value in values {
         let pid = value["ProcessId"]
@@ -671,36 +741,38 @@ fn running_from_json(text: &str, installation: Option<&Installation>) -> Result<
             .ok_or("运行进程缺少有效标识，不能安全开始操作")? as u32;
         let name = value["Name"].as_str().ok_or("无法确定运行进程归属")?;
         let matches = if name.eq_ignore_ascii_case("node.exe") {
+            if !targets_npm {
+                continue;
+            }
             let command = value["CommandLine"]
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .ok_or("没有权限读取 Node 进程命令行，无法确认 Claude 会话是否结束")?;
             let command = lexical_path(command);
-            let is_claude = command.contains("@anthropic-ai\\claude-code\\")
-                || command.contains("@anthropic-ai\\claude-code\"")
-                || command.contains("@anthropic-ai\\claude-code'");
             // A Claude npm session whose exact prefix is unavailable still blocks
             // npm operations rather than risking removal of a running package.
-            is_claude && installation.is_none_or(|i| i.source == Source::Npm)
+            command.contains("@anthropic-ai\\claude-code\\")
+                || command.contains("@anthropic-ai\\claude-code\"")
+                || command.contains("@anthropic-ai\\claude-code'")
         } else if name.eq_ignore_ascii_case("claude.exe") {
-            let executable = value["ExecutablePath"].as_str().filter(|s| !s.is_empty());
-            installation.is_none_or(|i| {
-                executable.is_none_or(|path| {
-                    process::equivalent(path, &i.path)
-                        || i.source == Source::Npm
-                        || (i.source == Source::Native
-                            && platform::user_home().is_ok_and(|home| {
-                                let versions = home.join(".local/share/claude");
-                                Path::new(path)
-                                    .canonicalize()
-                                    .ok()
-                                    .zip(versions.canonicalize().ok())
-                                    .is_some_and(|(executable, versions)| {
-                                        executable.starts_with(versions)
-                                    })
-                            }))
-                })
-            })
+            match value["ExecutablePath"].as_str().filter(|s| !s.is_empty()) {
+                // An unreadable image path (for example an elevated process)
+                // cannot be shown to be unrelated, so it keeps blocking.
+                None => true,
+                Some(path) => match installation {
+                    None => in_native_tree(path),
+                    Some(i) => match i.source {
+                        Source::Native => {
+                            process::equivalent(path, &i.path) || in_native_tree(path)
+                        }
+                        Source::Npm => i
+                            .prefix
+                            .as_deref()
+                            .is_none_or(|prefix| path_within(path, Path::new(prefix))),
+                        Source::Winget | Source::External => process::equivalent(path, &i.path),
+                    },
+                },
+            }
         } else {
             return Err("运行进程检测返回了未知程序，不能安全开始操作".into());
         };
@@ -716,6 +788,22 @@ fn lexical_path(path: &str) -> String {
         .replace('/', "\\")
         .trim_end_matches('\\')
         .to_lowercase()
+}
+
+/// Whether `path` is `root` or inside it. Paths that cannot be resolved (for
+/// example a directory that does not exist yet) are compared lexically.
+fn path_within(path: &str, root: &Path) -> bool {
+    let resolve = |path: &Path| {
+        lexical_path(
+            &path
+                .canonicalize()
+                .unwrap_or_else(|_| path.to_path_buf())
+                .to_string_lossy(),
+        )
+    };
+    let path = resolve(Path::new(path));
+    let root = resolve(root);
+    !root.is_empty() && (path == root || path.starts_with(&format!("{root}\\")))
 }
 
 fn native_install_owned(home: &Path, launcher: &Path) -> bool {
@@ -757,18 +845,124 @@ mod tests {
     fn process_probe_fails_closed_for_malformed_or_inaccessible_results() {
         assert!(running_from_json("", None).is_err());
         assert!(running_from_json("null", None).is_err());
+        // An unreadable Node command line fails closed for npm targets; other
+        // sources ignore Node (process_probe_ignores_processes_of_other_sources).
+        let npm = fixture_installation(
+            Source::Npm,
+            "C:/Users/Alice/AppData/Roaming/npm/claude.cmd",
+            Some("C:/Users/Alice/AppData/Roaming/npm"),
+        );
         assert!(running_from_json(
             r#"[{"ProcessId":42,"Name":"node.exe","CommandLine":null}]"#,
-            None
+            Some(&npm)
         )
         .is_err());
         assert!(running_from_json("[]", None).unwrap().is_empty());
     }
 
+    fn fixture_installation(source: Source, path: &str, prefix: Option<&str>) -> Installation {
+        Installation {
+            id: "fixture".into(),
+            source,
+            path: path.into(),
+            version: Some("2.1.326".into()),
+            scope: "user".into(),
+            active: true,
+            capabilities: Capabilities {
+                upgrade: true,
+                install_version: false,
+                uninstall: true,
+            },
+            detail: String::new(),
+            manual_command: None,
+            npm_path: prefix.map(|p| format!("{p}/npm.cmd")),
+            prefix: prefix.map(String::from),
+            fingerprint: "fixture".into(),
+        }
+    }
+
     #[test]
     fn process_probe_includes_npm_node_sessions_and_unknown_native_paths() {
+        let npm = fixture_installation(
+            Source::Npm,
+            "C:/Users/Alice/AppData/Roaming/npm/claude.cmd",
+            Some("C:/Users/Alice/AppData/Roaming/npm"),
+        );
         let json = r#"[{"ProcessId":42,"Name":"node.exe","CommandLine":"node C:/Users/Alice/AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code/cli.js"},{"ProcessId":43,"Name":"node.exe","CommandLine":"node C:/work/server.js"},{"ProcessId":44,"Name":"claude.exe","ExecutablePath":null}]"#;
-        assert_eq!(running_from_json(json, None).unwrap(), vec![42, 44]);
+        assert_eq!(running_from_json(json, Some(&npm)).unwrap(), vec![42, 44]);
+        // A fresh native install is not blocked by npm Node sessions, but an
+        // unidentifiable claude.exe still blocks it.
+        assert_eq!(running_from_json(json, None).unwrap(), vec![44]);
+    }
+
+    #[test]
+    fn process_probe_ignores_processes_of_other_sources() {
+        let unreadable_node = r#"[{"ProcessId":42,"Name":"node.exe","CommandLine":null}]"#;
+        let native =
+            fixture_installation(Source::Native, "C:/Users/Alice/.local/bin/claude.exe", None);
+        assert!(running_from_json(unreadable_node, Some(&native))
+            .unwrap()
+            .is_empty());
+        assert!(running_from_json(unreadable_node, None).unwrap().is_empty());
+        let npm = fixture_installation(
+            Source::Npm,
+            "C:/Users/Alice/AppData/Roaming/npm/claude.cmd",
+            Some("C:/Users/Alice/AppData/Roaming/npm"),
+        );
+        assert!(running_from_json(unreadable_node, Some(&npm)).is_err());
+
+        let other_cli = r#"[{"ProcessId":45,"Name":"claude.exe","ExecutablePath":"C:/Users/Alice/.vscode/extensions/anthropic.claude-code/resources/native-binary/claude.exe"},{"ProcessId":46,"Name":"claude.exe","ExecutablePath":"C:/Users/Alice/AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code/bin/claude.exe"}]"#;
+        assert!(running_from_json(other_cli, None).unwrap().is_empty());
+        assert!(running_from_json(other_cli, Some(&native))
+            .unwrap()
+            .is_empty());
+        assert_eq!(running_from_json(other_cli, Some(&npm)).unwrap(), vec![46]);
+    }
+
+    #[test]
+    fn fresh_native_install_waits_for_processes_in_the_native_tree() {
+        let home = platform::user_home().unwrap();
+        let launcher = home.join(".local/bin/claude.exe");
+        let version = home.join(".local/share/claude/versions/2.1.326");
+        let json = serde_json::json!([
+            {"ProcessId": 47, "Name": "claude.exe", "ExecutablePath": launcher.to_string_lossy()},
+            {"ProcessId": 48, "Name": "claude.exe", "ExecutablePath": version.to_string_lossy()},
+        ])
+        .to_string();
+        assert_eq!(running_from_json(&json, None).unwrap(), vec![47, 48]);
+    }
+
+    #[test]
+    fn desktop_bundled_cli_versions_are_found_and_sorted() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("claude-code");
+        for (version, nested) in [("2.1.325", true), ("2.1.99", false), ("notes", false)] {
+            let directory = if nested {
+                root.join(version).join("806e0a45e6f5")
+            } else {
+                root.join(version)
+            };
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("claude.exe"), b"fixture").unwrap();
+        }
+        std::fs::create_dir_all(root.join("2.1.400")).unwrap();
+        assert_eq!(
+            desktop_bundled_versions(&[root, temporary.path().join("missing")]),
+            vec!["2.1.99".to_string(), "2.1.325".to_string()]
+        );
+    }
+
+    #[test]
+    fn path_containment_handles_missing_roots_and_prefix_lookalikes() {
+        assert!(path_within(
+            "C:/Tools/npm/node_modules/x.exe",
+            Path::new("C:\\tools\\npm\\")
+        ));
+        assert!(!path_within(
+            "C:/Tools/npm-other/x.exe",
+            Path::new("C:/Tools/npm")
+        ));
+        assert!(!path_within("C:/Tools/npm/x.exe", Path::new("")));
     }
 
     #[test]

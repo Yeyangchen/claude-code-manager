@@ -412,14 +412,37 @@ pub fn verify_authenticode(path: &Path) -> Result<(), String> {
     let mut command = process::ps("$s=Get-AuthenticodeSignature -LiteralPath $env:CCM_VERIFY_PATH; @{status=$s.Status.ToString(); signer=if($s.SignerCertificate){$s.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false)}else{''}}|ConvertTo-Json -Compress");
     command.env("CCM_VERIFY_PATH", path);
     let result = process::capture(command, std::time::Duration::from_secs(30))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&result.stdout).map_err(|_| "无法读取 Windows 文件签名")?;
-    let valid_signer = matches!(
-        value["signer"].as_str(),
-        Some("Anthropic, PBC") | Some("Anthropic PBC")
+    validate_authenticode_output(&result)
+}
+
+fn authenticode_error(reason: &str, output: &process::Output) -> String {
+    let diagnostic = format!(
+        "{reason}; exit={}; stdout={}; stderr={}",
+        output.code, output.stdout, output.stderr
     );
-    if result.code != 0 || value["status"] != "Valid" || !valid_signer {
-        return Err("Windows 代码签名无效或签名者不是 Anthropic".into());
+    crate::storage::redact(&diagnostic)
+        .chars()
+        .take(2000)
+        .collect()
+}
+
+fn validate_authenticode_output(result: &process::Output) -> Result<(), String> {
+    #[derive(Deserialize)]
+    struct AuthenticodeResult {
+        status: String,
+        signer: String,
+    }
+    if result.code != 0 {
+        return Err(authenticode_error("Windows 文件签名检测程序失败", result));
+    }
+    let value: AuthenticodeResult = serde_json::from_str(&result.stdout)
+        .map_err(|_| authenticode_error("无法解析 Windows 文件签名检测结果", result))?;
+    let valid_signer = matches!(value.signer.as_str(), "Anthropic, PBC" | "Anthropic PBC");
+    if value.status != "Valid" || !valid_signer {
+        return Err(authenticode_error(
+            "Windows 代码签名无效或签名者不是 Anthropic",
+            result,
+        ));
     }
     Ok(())
 }
@@ -443,6 +466,47 @@ mod tests {
             assert!(validate_version(invalid).is_err());
         }
         assert_eq!(validate_version("2.1.326").unwrap(), "2.1.326");
+    }
+
+    #[test]
+    fn authenticode_failures_are_explanatory_and_never_accepted() {
+        let valid = process::Output {
+            code: 0,
+            stdout: r#"{"status":"Valid","signer":"Anthropic, PBC"}"#.into(),
+            stderr: String::new(),
+        };
+        validate_authenticode_output(&valid).unwrap();
+        for output in [
+            process::Output {
+                code: 1,
+                stdout: valid.stdout.clone(),
+                stderr: "module could not be loaded".into(),
+            },
+            process::Output {
+                code: 1,
+                stdout: String::new(),
+                stderr: "CouldNotAutoloadMatchingModule".into(),
+            },
+            process::Output {
+                code: 0,
+                stdout: "not json".into(),
+                stderr: String::new(),
+            },
+            process::Output {
+                code: 0,
+                stdout: r#"{"status":"NotSigned","signer":""}"#.into(),
+                stderr: String::new(),
+            },
+            process::Output {
+                code: 0,
+                stdout: r#"{"status":"Valid","signer":"Microsoft Windows"}"#.into(),
+                stderr: String::new(),
+            },
+        ] {
+            let error = validate_authenticode_output(&output).unwrap_err();
+            assert!(error.contains(&format!("exit={}", output.code)));
+            assert!(error.contains("stdout=") && error.contains("stderr="));
+        }
     }
     #[test]
     fn isolates_exact_changelog_section() {

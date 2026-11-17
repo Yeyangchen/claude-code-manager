@@ -250,13 +250,17 @@ mod tests {
         let actual = PathBuf::from(value["module"].as_str().unwrap())
             .canonicalize()
             .unwrap();
-        let expected = powershell()
-            .parent()
-            .unwrap()
+        let expected_home = powershell().parent().unwrap().canonicalize().unwrap();
+        let expected_module = expected_home
             .join("Modules/Microsoft.PowerShell.Security")
             .canonicalize()
             .unwrap();
-        assert_eq!(actual, expected);
+        // Built-in binary modules can report PSHOME as ModuleBase; both valid
+        // layouts remain inside the explicitly selected Windows PowerShell.
+        assert!(
+            actual == expected_home || actual == expected_module,
+            "{actual:?}"
+        );
         assert!(!value["policy"].as_str().unwrap().is_empty());
         assert!(!value["status"].as_str().unwrap().is_empty());
     }

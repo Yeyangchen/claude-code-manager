@@ -36,5 +36,5 @@ jobs:
       - run: pnpm build
       - name: Verify user PATH apply, restore and external-change conflict
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked isolated_path_smoke -- --ignored --nocapture --test-threads=1
-      - name: Verify official bootstrap, exact version and reinstall
+      - name: Verify official bootstrap, install, reinstall, downgrade and upgrade
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked native_install_smoke -- --ignored --nocapture --test-threads=1

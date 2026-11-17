@@ -684,7 +684,8 @@ mod tests {
             process::executable_command(&binary, &["install".into(), "--help".into()]);
         isolate(&mut help_command);
         let help = process::capture(help_command, std::time::Duration::from_secs(30)).unwrap();
-        let force_supported = help.stdout.split_whitespace().any(|word| word == "--force");
+        let force_supported =
+            help.code == 0 && help.stdout.split_whitespace().any(|word| word == "--force");
         println!("bootstrap={bootstrap_version}; --force={force_supported}");
         println!("install help: {}", crate::storage::redact(&help.stdout));
         for (target, reinstall) in [
@@ -694,14 +695,15 @@ mod tests {
             (&target, false),
         ] {
             let mut args = vec!["install".into(), target.manifest.version.clone()];
-            if reinstall && force_supported {
+            if force_supported {
                 args.push("--force".into());
             }
             let mut command = process::executable_command(&binary, &args);
             isolate(&mut command);
             let output = process::capture(command, std::time::Duration::from_secs(600)).unwrap();
             println!(
-                "reinstall={reinstall}; exit={}; {}",
+                "target={}; reinstall={reinstall}; force={force_supported}; exit={}; {}",
+                target.manifest.version,
                 output.code,
                 crate::storage::redact(&format!("{}\n{}", output.stdout, output.stderr))
             );

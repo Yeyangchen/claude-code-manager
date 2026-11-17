@@ -1,14 +1,18 @@
 import { createHash } from 'node:crypto'
 import { copyFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
-import { basename, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 export const repository = 'Yeyangchen/claude-code-manager'
 export const sha256 = (content) => createHash('sha256').update(content).digest('hex')
 
+export function installerFileName(version) {
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/.test(version)) throw new Error('Invalid release version')
+  return `claude-code-manager_${version}_x64-setup.exe`
+}
+
 export function updaterManifest(version, fileName, signature, date) {
-  if (!/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version)) throw new Error('Invalid release version')
-  if (basename(fileName) !== fileName || !fileName.endsWith('_x64-setup.exe')) throw new Error('Invalid x64 installer filename')
+  if (fileName !== installerFileName(version)) throw new Error('Invalid x64 installer filename')
   const decoded = Buffer.from(signature.trim(), 'base64').toString('utf8')
   if (!decoded.startsWith('untrusted comment:') || !decoded.includes('trusted comment:')) throw new Error('Missing Tauri installer signature')
   return {
@@ -31,14 +35,16 @@ export async function prepareRelease({ root = process.cwd(), tag, commit, date =
   const bundle = join(root, 'src-tauri/target/release/bundle/nsis')
   const candidates = (await readdir(bundle)).filter((name) => name.endsWith('_x64-setup.exe'))
   if (candidates.length !== 1) throw new Error('Expected exactly one x64 NSIS installer')
-  const name = candidates[0]
-  if (!name.includes(`_${pkg.version}_`)) throw new Error('Installer version mismatch')
-  const signature = await readFile(join(bundle, `${name}.sig`), 'utf8')
+  const sourceName = candidates[0]
+  if (!sourceName.includes(`_${pkg.version}_`)) throw new Error('Installer version mismatch')
+  const name = installerFileName(pkg.version)
+  const signature = await readFile(join(bundle, `${sourceName}.sig`), 'utf8')
   const manifest = updaterManifest(pkg.version, name, signature, date)
   const output = join(root, 'artifacts/release')
   await mkdir(output, { recursive: true })
-  await copyFile(join(bundle, name), join(output, name))
-  await copyFile(join(bundle, `${name}.sig`), join(output, `${name}.sig`))
+  await copyFile(join(bundle, sourceName), join(output, name))
+  // The signature authenticates the installer bytes. Retain its original trusted comment.
+  await copyFile(join(bundle, `${sourceName}.sig`), join(output, `${name}.sig`))
   await writeFile(join(output, 'latest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
   await writeFile(join(output, 'provenance.json'), `${JSON.stringify({ repository, tag, commit, windowsAuthenticode: 'unsigned', updaterSignature: 'Tauri minisign', date }, null, 2)}\n`)
   const names = [name, `${name}.sig`, 'latest.json', 'provenance.json'].sort()

@@ -4,7 +4,7 @@
 
 ## 本次构建
 
-- 版本：0.1.0-beta.1。
+- 版本：0.1.0-beta.2。
 - 目标：Windows x64，Windows 10 1809+ 与 Windows 11。
 - 本机：Windows build 26200，标准用户；未对本机 Claude 安装、用户 PATH 或 Claude 配置执行写入测试。
 - 本机 MSVC 安装受执行环境审批策略阻止。Rust 测试和安装包构建转交 GitHub Windows runner。
@@ -26,7 +26,7 @@
 
 [隔离验收 44036616241](https://github.com/Yeyangchen/claude-code-manager/actions/runs/44036616241) 的 PATH 烟测已通过：真实 HKCU Path 写入、原始字节/值类型核对、新进程环境、原样撤销及外部改动拒绝覆盖。该次 Native 下载在 Windows 文件签名读取阶段失败，未计为安装通过。已定位为 Windows PowerShell 5.1 继承 PowerShell 7 模块路径导致 Security 模块加载失败：仅为检测子进程设置系统模块目录后，本机只读签名/执行策略探测成功。公共命令构造器已修复并加入 Windows 回归测试，真实安装重跑结果另行记录。
 
-[隔离验收 44037904317](https://github.com/Yeyangchen/claude-code-manager/actions/runs/44037904317) 已通过官方 2.1.326 全新安装、同版本 `--force` 重装和 2.1.311 降级的实际版本、摘要及 Authenticode 校验。回到缓存已有的 2.1.326 时，上游输出成功但启动文件仍为 2.1.311，实际版本断言阻止了误判。执行器调整为在官方帮助确认支持时，对精确版本安装使用 `--force`，并保留安装后的全部验证。最终重跑、发布签名与安装包证据汇总于 [Beta 发行说明](https://github.com/Yeyangchen/claude-code-manager/releases/tag/v0.1.0-beta.1)。
+[隔离验收 44037904317](https://github.com/Yeyangchen/claude-code-manager/actions/runs/44037904317) 已通过官方 2.1.326 全新安装、同版本 `--force` 重装和 2.1.311 降级的实际版本、摘要及 Authenticode 校验。回到缓存已有的 2.1.326 时，上游输出成功但启动文件仍为 2.1.311，实际版本断言阻止了误判。执行器调整为在官方帮助确认支持时，对精确版本安装使用 `--force`，并保留安装后的全部验证。最终重跑、发布签名与安装包证据汇总于 [Beta 发行说明](https://github.com/Yeyangchen/claude-code-manager/releases/tag/v0.1.0-beta.2)。
 
 ## 验收矩阵
 

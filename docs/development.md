@@ -26,6 +26,8 @@ pnpm tauri:build --bundles nsis
 
 NSIS 输出位于 `src-tauri/target/release/bundle/nsis/`。源码和安装包版本必须一致，`node scripts/check-project.mjs` 验证项目版本和基础发布元数据。
 
+正式发布整理到 `artifacts/release/` 后使用 `claude-code-manager_<version>_x64-setup.exe` 及对应 `.sig`；以此规范名称生成更新地址和校验清单。原始 NSIS 输出文件名可能带空格，不能直接作为最终发布附件名。
+
 ## 验证环境
 
 Rust 测试对临时目录、配置快照、PATH 字符串和模拟操作做回归验证。真实安装、卸载和注册表写入在一次性虚拟机或隔离账户中执行，并记录到兼容性表。

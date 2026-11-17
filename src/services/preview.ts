@@ -1,9 +1,10 @@
 import type { ManagerApi } from './manager';
+import { version as appVersion } from '../../package.json';
 import type { Operation, Plan, PlanRequest, Snapshot, ChangeEntry } from '../shared/types';
 
 // Imported only by the development browser entry. This adapter never reads the host.
 export const previewSnapshot: Snapshot = {
-  appVersion: '0.1.0-beta.1',
+  appVersion,
   environment: {
     os: 'Windows 11', arch: 'x64', userName: 'preview', elevated: false,
     configDir: 'C:\\Users\\preview\\.claude', supported: true,

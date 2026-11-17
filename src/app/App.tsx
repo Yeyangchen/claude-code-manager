@@ -1,4 +1,5 @@
 import { t } from '../shared/i18n';
+import { version as appVersion } from '../../package.json';
 import { useCallback, useEffect, useState } from 'react';
 import { Activity, ArrowDownToLine, ArrowRight, Boxes, CircleHelp, Clock3, ExternalLink, LayoutDashboard, LoaderCircle, Monitor, RefreshCw, Settings2, Terminal, X } from 'lucide-react';
 import { Badge, Loading, Modal, Notice } from './components';
@@ -120,7 +121,7 @@ export default function App({ api: injectedApi }: {
       <div className="local-device"><span className="device-symbol"><Monitor size={18}/></span><div><strong>{snapshot?.environment.os ?? t("本机设备")}</strong><span>{snapshot ? `${snapshot.environment.arch} · ${snapshot.environment.userName}` : t("正在连接")}</span></div><span className="connected-dot"/></div>
       <button className={`nav-item ${page === 'settings' ? 'active' : ''}`} onClick={() => setPage('settings')} aria-current={page === 'settings' ? 'page' : undefined}><Settings2 size={18}/><span>{t("设置")}</span></button>
       <button className="nav-item" onClick={() => api && void api.openUrl('https://github.com/Yeyangchen/claude-code-manager/issues').catch((failure) => setError(errorMessage(failure)))}><CircleHelp size={18}/><span>{t("帮助与反馈")}</span><ExternalLink size={12}/></button>
-      <div className="sidebar-footer"><span>{t("社区开源工具")}</span><span>v{snapshot?.appVersion ?? '0.1.0-beta.1'}</span></div>
+      <div className="sidebar-footer"><span>{t("非官方社区工具")}</span><span>v{snapshot?.appVersion ?? appVersion}</span></div>
     </aside>
 
     <main className="main-content">

@@ -26,6 +26,8 @@ Release 草稿中现有附件不会被自动覆盖。同 tag 重跑仅补充缺�
 
 ## 更新元数据
 
+发布整理阶段把安装包复制为 `claude-code-manager_<version>_x64-setup.exe`，签名使用相同文件名加 `.sig`。这些名称仅含安全 ASCII 字符，`latest.json` 的下载地址、`SHA256SUMS` 与 GitHub Release 附件必须逐字一致；不要直接上传打包器产生的含空格名称。
+
 稳定地址为 `https://github.com/Yeyangchen/claude-code-manager/releases/latest/download/latest.json`。先完整上传所有附件，再发布草稿，让稳定入口只指向完整版本。元数据包含 Windows x64 的版本化 URL 和 Tauri 签名。
 
 ## 缺陷撤回

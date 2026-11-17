@@ -7,7 +7,7 @@
 
 **非官方社区项目。与 Anthropic 无隶属、赞助或背书关系。** Claude、Claude Code 是其权利人的商标。本项目采用原创图标，不分发 Claude Code 二进制文件，不绕过官方登录、订阅或组织策略。
 
-当前版本为 **0.1.0-beta.1**。发布与验收状态见 [实际支持和验收记录](docs/compatibility.md)。未经验证的场景不会被标记为稳定支持。
+当前版本为 **0.1.0-beta.2**。发布与验收状态见 [实际支持和验收记录](docs/compatibility.md)。未经验证的场景不会被标记为稳定支持。
 
 ![开发预览界面，使用模拟数据](docs/images/overview-preview.jpg)
 
@@ -22,7 +22,7 @@
 预览版暂未使用 Windows Authenticode 代码签名证书，Windows 可能显示“未知发布者”或 SmartScreen 提示。Tauri 更新签名与 Windows 代码签名是两套独立机制。请先核对来源与 SHA256，不要为运行应用关闭系统安全功能。
 
 ```powershell
-Get-FileHash -Algorithm SHA256 '.\Claude Code Manager_0.1.0-beta.1_x64-setup.exe'
+Get-FileHash -Algorithm SHA256 '.\claude-code-manager_0.1.0-beta.2_x64-setup.exe'
 ```
 
 将结果与同一 Release 的 `SHA256SUMS` 对照。不同构建的文件名以发布页为准。

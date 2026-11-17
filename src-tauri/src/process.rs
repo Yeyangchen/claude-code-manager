@@ -74,7 +74,15 @@ pub fn capture(mut command: Command, timeout: Duration) -> Result<Output, String
 }
 
 pub fn ps(script: &str) -> Command {
-    let mut command = Command::new(powershell());
+    let executable = powershell();
+    let mut command = Command::new(&executable);
+    // The host may be PowerShell 7 (GitHub Actions, developer tools). Its
+    // inherited module path can select incompatible Security/CimCmdlets modules
+    // before Windows PowerShell 5.1's own modules, even with -NoProfile.
+    if let Some(directory) = executable.parent() {
+        command.env("PSModulePath", directory.join("Modules"));
+    }
+    command.env_remove("PSModuleAnalysisCachePath");
     command.args(["-NoProfile", "-NonInteractive", "-Command"]);
     command.arg(format!("[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); $ErrorActionPreference='Stop'; {script}"));
     command
@@ -230,5 +238,30 @@ mod tests {
     fn bounded_output_keeps_draining() {
         let data = std::io::Cursor::new(vec![b'a'; 100_000]);
         assert_eq!(drain(data, 100).len(), 100);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_loads_its_own_security_module() {
+        let command = ps("$s=Get-AuthenticodeSignature -LiteralPath (Join-Path $PSHOME 'powershell.exe'); @{policy=(Get-ExecutionPolicy).ToString(); module=(Get-Command Get-AuthenticodeSignature).Module.ModuleBase; status=$s.Status.ToString()} | ConvertTo-Json -Compress");
+        let output = capture(command, Duration::from_secs(30)).unwrap();
+        assert_eq!(output.code, 0, "{}", crate::storage::redact(&output.stderr));
+        let value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+        let actual = PathBuf::from(value["module"].as_str().unwrap())
+            .canonicalize()
+            .unwrap();
+        let expected_home = powershell().parent().unwrap().canonicalize().unwrap();
+        let expected_module = expected_home
+            .join("Modules/Microsoft.PowerShell.Security")
+            .canonicalize()
+            .unwrap();
+        // Built-in binary modules can report PSHOME as ModuleBase; both valid
+        // layouts remain inside the explicitly selected Windows PowerShell.
+        assert!(
+            actual == expected_home || actual == expected_module,
+            "{actual:?}"
+        );
+        assert!(!value["policy"].as_str().unwrap().is_empty());
+        assert!(!value["status"].as_str().unwrap().is_empty());
     }
 }

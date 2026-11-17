@@ -1109,17 +1109,15 @@ impl Manager {
                 }
                 self.recheck_installation(installation.as_ref())?;
                 let mut args = vec!["install".into(), version.clone()];
-                if self.operation(id)?.kind == "reinstall" {
-                    let help = process::capture(
-                        process::executable_command(
-                            &executable,
-                            &["install".into(), "--help".into()],
-                        ),
-                        Duration::from_secs(15),
-                    )?;
-                    if help.stdout.split_whitespace().any(|word| word == "--force") {
-                        args.push("--force".into());
-                    }
+                let help = process::capture(
+                    process::executable_command(&executable, &["install".into(), "--help".into()]),
+                    Duration::from_secs(15),
+                )?;
+                // The official installer can report success without repointing
+                // the launcher when the requested version is already cached.
+                // Every explicitly confirmed target must activate that version.
+                if help.code == 0 && help.stdout.split_whitespace().any(|word| word == "--force") {
+                    args.push("--force".into());
                 }
                 process::executable_command(&executable, &args)
             }

@@ -5,23 +5,26 @@
   --surface: #fffefa;
   --topbar: #f9f8f5;
   --input: #fffefa;
+  /* Text tokens keep at least 4.5:1 contrast on every light surface. */
   --text: #292b27;
-  --muted: #777a70;
-  --faint: #999c91;
+  --muted: #575a51;
+  --faint: #6a6d62;
   --border: #e7e6de;
   --border-strong: #d9dacf;
   --hover: #f0f0e9;
-  --accent: #a65f45;
-  --accent-hover: #914d36;
+  --accent: #94503a;
+  --accent-hover: #7f432f;
   --accent-soft: #efe4da;
   --accent-border: #d0a997;
-  --success: #6a8067;
+  --on-accent: #fff9f5;
+  --on-danger: #fffaf8;
+  --success: #56704f;
   --success-soft: #edf2e9;
   --success-border: #dbe6d6;
-  --warning: #9b773b;
+  --warning: #82622b;
   --warning-soft: #f7f0e2;
   --warning-border: #eadebf;
-  --danger: #ad5349;
+  --danger: #a14a40;
   --danger-soft: #faeeea;
   --danger-border: #eed3cb;
   --hero: #f3f1e9;
@@ -38,7 +41,7 @@
   --input: #1c1f1a;
   --text: #e8e8df;
   --muted: #a7ac9e;
-  --faint: #777e71;
+  --faint: #8f9688;
   --border: #34392f;
   --border-strong: #474e40;
   --hover: #2d3228;
@@ -46,6 +49,9 @@
   --accent-hover: #d39b82;
   --accent-soft: #393028;
   --accent-border: #7b5b47;
+  /* Light accent fills need dark text in this theme. */
+  --on-accent: #1f1b18;
+  --on-danger: #1f1b18;
   --success: #a0b792;
   --success-soft: #2b3527;
   --success-border: #3f5135;

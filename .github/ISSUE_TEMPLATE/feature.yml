@@ -1,0 +1,10 @@
+name: 功能建议
+description: 说明希望解决的使用场景
+labels: [enhancement]
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 场景与期望结果
+    validations:
+      required: true

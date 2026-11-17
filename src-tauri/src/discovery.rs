@@ -25,11 +25,11 @@ pub fn scan() -> Result<Discovery, String> {
         .and_then(|v| v["build"].as_str())
         .and_then(|v| v.parse::<u32>().ok());
     let supported = cfg!(windows) && build.is_some_and(|v| v >= 17763);
-    let os = system
+    let product_name = system
         .as_ref()
         .and_then(|v| v["name"].as_str())
-        .unwrap_or(std::env::consts::OS)
-        .to_string();
+        .unwrap_or(std::env::consts::OS);
+    let os = platform::windows_display_name(product_name, build);
     checks.push(check(
         "os",
         "系统版本",
@@ -319,6 +319,10 @@ pub fn scan() -> Result<Discovery, String> {
         }
     }
     if let Ok(output) = process::ps_capture("Get-ExecutionPolicy") {
+        let execution_policy = match output.stdout.trim() {
+            "" => "无法读取执行策略",
+            value => value,
+        };
         checks.push(check(
             "execution-policy",
             "PowerShell 执行策略",
@@ -327,7 +331,7 @@ pub fn scan() -> Result<Discovery, String> {
             } else {
                 "info"
             },
-            &format!("{}。此设置可能影响 npm 的 .ps1 启动脚本。", output.stdout),
+            &format!("{execution_policy}。此设置可能影响 npm 的 .ps1 启动脚本。"),
         ));
     }
     Ok(Discovery {

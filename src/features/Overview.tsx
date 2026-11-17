@@ -33,7 +33,7 @@ export function Overview({ snapshot, selected, catalog, disabled, onPlan, onNavi
           <button className="text-link" onClick={() => onNavigate('versions')}>{t("选择其他版本")}<ArrowRight size={15}/></button>
         </div>
       </div>
-      <div className="hero-bottom"><span><CircleCheck size={15}/>{selected?.active ? t("当前终端命中此安装") : selected ? t("终端命中情况见环境页") : t("等待完成安装检测")}</span><span>{target ? t("官方 {value0} · v{value1}", { value0: snapshot.policy.channel, value1: target }) : t("正在查询发布通道")}</span></div>
+      <div className="hero-bottom"><span><CircleCheck size={15}/>{selected?.active ? t("当前终端命中此安装") : selected ? t("终端命中情况见环境页") : t("未发现可管理的安装")}</span><span>{target ? t("官方 {value0} · v{value1}", { value0: snapshot.policy.channel, value1: target }) : t("正在查询发布通道")}</span></div>
     </section>
     {needsRepair && <Notice>{t("已发现安装文件，但无法读取版本。重新安装前会复核该实例及官方产物。")}</Notice>}
 

@@ -35,6 +35,13 @@ pub fn native_architecture() -> String {
     }
 }
 
+pub fn windows_display_name(product_name: &str, build: Option<u32>) -> String {
+    match (build, product_name.strip_prefix("Windows 10")) {
+        (Some(22000..), Some(edition)) => format!("Windows 11{edition}"),
+        _ => product_name.to_owned(),
+    }
+}
+
 #[cfg(windows)]
 pub fn is_elevated() -> Result<bool, String> {
     use windows_sys::Win32::Foundation::CloseHandle;

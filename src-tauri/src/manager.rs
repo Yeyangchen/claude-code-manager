@@ -121,7 +121,9 @@ impl Manager {
 
     pub fn settings(&self) -> Result<Settings, String> {
         let result = storage::read_json::<Settings>(&self.data_dir.join("settings.json"))?;
-        if result.read_only {
+        let proxy_schema =
+            storage::read_json::<serde_json::Value>(&self.data_dir.join("proxy.json"))?;
+        if result.read_only || proxy_schema.read_only {
             self.read_only.store(true, Ordering::Relaxed);
         }
         let proxy_state = proxy::load_proxy(&self.data_dir)?;

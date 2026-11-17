@@ -39,6 +39,7 @@
       "icons/icon.ico",
       "icons/icon.png"
     ],
+    "resources": ["resources/THIRD_PARTY_NOTICES.txt"],
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper",

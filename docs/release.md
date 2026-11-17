@@ -12,6 +12,8 @@ Tauri updater 必须验证签名，不能关闭验证。公开密钥随源码分
 
 Windows Authenticode 证书另外配置。当前 beta 明确标记未做 Authenticode 签名。Tauri `.sig` 只证明更新包由项目发布者签发，不会消除 Windows SmartScreen 提示。
 
+安装包同时携带 `resources/THIRD_PARTY_NOTICES.txt`。更新依赖后运行 `node scripts/generate-notices.mjs` 重新汇总许可证；CI 的 `--check` 模式核对其与锁定依赖一致。未随包提供许可文件的上游依赖，其固定来源、版本和 SHA256 记录在 `licenses/overrides.json`。
+
 ## 发布步骤
 
 1. 在功能分支更新版本、CHANGELOG 和实际验收记录，PR 检查通过后 squash 合并。

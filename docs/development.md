@@ -30,6 +30,10 @@ NSIS 输出位于 `src-tauri/target/release/bundle/nsis/`。源码和安装包�
 
 Rust 测试对临时目录、配置快照、PATH 字符串和模拟操作做回归验证。真实安装、卸载和注册表写入在一次性虚拟机或隔离账户中执行，并记录到兼容性表。
 
+`Isolated Windows acceptance` 是手动触发的 GitHub Actions 工作流，使用一次性的 GitHub hosted Windows runner。它运行真实 PATH 写入/撤销/外部冲突烟测，以及官方 Native 精确版本安装与重装。相关 Rust 测试默认 `#[ignore]`，带环境断言，不能在开发者账户中启用。
+
+CI 的 `windows-x64-preview` 附件包含 NSIS 安装包和可直接启动的主程序。预览附件没有 Release updater 签名；签名发布附件由 Release 工作流单独生成。
+
 ## Git
 
 `main` 用于可追踪的主线，开发使用短期功能分支。每次提交检查暂存区。远端为 `Yeyangchen/claude-code-manager`，PR 合并采用 squash。

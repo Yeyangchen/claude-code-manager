@@ -32,6 +32,7 @@ jobs:
       - run: node scripts/check-project.mjs
       - run: node scripts/check-security-exceptions.mjs
       - run: node --test scripts/release.test.mjs
+      - run: node --test scripts/generate-notices.test.mjs
       - run: pnpm audit --prod --audit-level high
 
   windows:
@@ -55,6 +56,7 @@ jobs:
           cache-on-failure: true
       - run: pnpm install --frozen-lockfile
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - run: node scripts/generate-notices.mjs --check
       - run: pnpm build
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
@@ -62,7 +64,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-x64-preview
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/claude-code-manager.exe
           if-no-files-found: error
           retention-days: 14
 

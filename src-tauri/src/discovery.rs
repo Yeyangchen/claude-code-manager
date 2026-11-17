@@ -605,7 +605,7 @@ fn resolve_shells() -> Vec<ShellResolution> {
                 "--noprofile",
                 "--norc",
                 "-c",
-                "command -v claude | xargs -r cygpath -w",
+                r#"resolved=$(command -v claude); if [ -n "$resolved" ]; then cygpath -w "$resolved"; fi"#,
             ]);
             let _ = platform::apply_fresh_user_path(&mut command);
             let candidates = process::capture(command, Duration::from_secs(10))

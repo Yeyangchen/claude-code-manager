@@ -132,6 +132,7 @@ pub fn executable_command(path: &Path, args: &[String]) -> Command {
 pub fn resolve(name: &str) -> Option<PathBuf> {
     let mut command = ps("$c=Get-Command -Name $env:CCM_COMMAND_NAME -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { $c.Source }");
     command.env("CCM_COMMAND_NAME", name);
+    crate::platform::apply_fresh_user_path(&mut command).ok()?;
     capture(command, Duration::from_secs(10))
         .ok()
         .filter(|o| o.code == 0)
@@ -140,13 +141,13 @@ pub fn resolve(name: &str) -> Option<PathBuf> {
 }
 
 pub fn version(path: &Path) -> Option<String> {
-    capture(
-        executable_command(path, &["--version".into()]),
-        Duration::from_secs(12),
-    )
-    .ok()
-    .filter(|o| o.code == 0)
-    .and_then(|o| parse_version(&o.stdout))
+    let mut command = executable_command(path, &["--version".into()]);
+    crate::platform::apply_fresh_user_path(&mut command).ok()?;
+    command.env("DISABLE_AUTOUPDATER", "1");
+    capture(command, Duration::from_secs(12))
+        .ok()
+        .filter(|o| o.code == 0)
+        .and_then(|o| parse_version(&o.stdout))
 }
 
 pub fn pid_running(pid: u32) -> Result<bool, String> {

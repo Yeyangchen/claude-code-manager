@@ -281,6 +281,46 @@ pub async fn download_binary<F>(
     architecture: &str,
     folder: &Path,
     cancelled: &std::sync::atomic::AtomicBool,
+    progress: F,
+) -> Result<PathBuf, String>
+where
+    F: FnMut(u64, u64) + Send,
+{
+    cancellable_transfer(
+        cancelled,
+        download_binary_inner(client, checked, architecture, folder, cancelled, progress),
+    )
+    .await
+}
+
+async fn cancellable_transfer<T>(
+    cancelled: &std::sync::atomic::AtomicBool,
+    work: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
+    let cancellation = async {
+        loop {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = cancellation => Err("cancelled".into()),
+        result = work => result,
+    }
+}
+
+async fn download_binary_inner<F>(
+    client: &Client,
+    checked: &VerifiedManifest,
+    architecture: &str,
+    folder: &Path,
+    cancelled: &std::sync::atomic::AtomicBool,
     mut progress: F,
 ) -> Result<PathBuf, String>
 where
@@ -457,26 +497,112 @@ mod tests {
         assert!(verify_digest(&path, &artifact).is_err());
     }
 
+    #[tokio::test]
+    async fn cancellation_interrupts_stalled_transfer_before_installer_stage() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_request = cancelled.clone();
+        let installer_reached = AtomicBool::new(false);
+        let signal = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            cancel_request.store(true, Ordering::Relaxed);
+        });
+        // A connection/stream that never completes, without making a request.
+        let stalled = async {
+            std::future::pending::<()>().await;
+            installer_reached.store(true, Ordering::Relaxed);
+            Ok(())
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            cancellable_transfer(&cancelled, stalled),
+        )
+        .await
+        .expect("cancel must be responsive");
+        assert_eq!(result.unwrap_err(), "cancelled");
+        assert!(!installer_reached.load(Ordering::Relaxed));
+        signal.await.unwrap();
+    }
+
     /// Never run on a developer machine. The explicit opt-in and fresh-profile
-    /// checks are deliberate because this installs Claude in the runner's home.
+    /// checks are deliberate. Child processes receive a separate temporary home,
+    /// settings directory and PATH so preinstalled runner CLIs are never migrated.
     #[tokio::test]
     #[ignore = "installs Claude only on an explicitly opted-in disposable GitHub runner"]
     async fn native_install_smoke() {
         assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
         assert_eq!(std::env::var("CCM_RUN_INSTALL_SMOKE").as_deref(), Ok("1"));
-        let home = crate::platform::user_home().unwrap();
+        assert_eq!(
+            std::env::var("RUNNER_ENVIRONMENT").as_deref(),
+            Ok("github-hosted")
+        );
+        assert_eq!(std::env::var("RUNNER_OS").as_deref(), Ok("Windows"));
+        let original_home = crate::platform::user_home().unwrap();
+        let original_launcher = original_home.join(".local/bin/claude.exe");
+        let original_fingerprint = process::fingerprint(&original_launcher);
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path().join("profile");
+        for directory in [
+            home.clone(),
+            home.join("AppData/Local"),
+            home.join("AppData/Roaming"),
+            home.join("claude-settings"),
+        ] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
         let launcher = home.join(".local/bin/claude.exe");
         assert!(
             !launcher.exists(),
             "smoke requires a fresh disposable runner profile"
         );
-        let temporary = tempfile::tempdir().unwrap();
+        let system = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows SystemRoot"));
+        let mut search = vec![
+            system.join("System32"),
+            system.clone(),
+            system.join("System32/WindowsPowerShell/v1.0"),
+        ];
+        let git = process::resolve("git.exe");
+        if let Some(parent) = git.as_ref().and_then(|path| path.parent()) {
+            search.push(parent.to_path_buf());
+        }
+        let isolated_path = std::env::join_paths(search).unwrap();
+        let isolate = |command: &mut std::process::Command| {
+            command
+                .current_dir(&home)
+                .env("USERPROFILE", &home)
+                .env("HOME", &home)
+                .env("APPDATA", home.join("AppData/Roaming"))
+                .env("LOCALAPPDATA", home.join("AppData/Local"))
+                .env("CLAUDE_CONFIG_DIR", home.join("claude-settings"))
+                .env("XDG_CONFIG_HOME", home.join(".config"))
+                .env("XDG_DATA_HOME", home.join(".local/share"))
+                .env("XDG_CACHE_HOME", home.join(".cache"))
+                .env("PATH", &isolated_path)
+                .env("npm_config_prefix", home.join("npm"))
+                .env("DISABLE_AUTOUPDATER", "1")
+                .env("CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE", "0")
+                .env_remove("DISABLE_UPDATES")
+                .env_remove("NODE_OPTIONS");
+            if let Some(bash) = git
+                .as_ref()
+                .and_then(|path| path.parent())
+                .and_then(Path::parent)
+                .map(|path| path.join("bin/bash.exe"))
+                .filter(|path| path.is_file())
+            {
+                command.env("CLAUDE_CODE_GIT_BASH_PATH", bash);
+            }
+        };
         let client = reqwest::Client::builder()
             .user_agent("claude-code-manager-isolated-smoke/0.1")
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .unwrap();
         let target = manifest(&client, "2.1.326").await.unwrap();
+        let older = manifest(&client, "2.1.311").await.unwrap();
         let bootstrap_version = channel(&client, "latest").await.unwrap();
         let bootstrap = manifest(&client, &bootstrap_version).await.unwrap();
         let cancelled = std::sync::atomic::AtomicBool::new(false);
@@ -490,37 +616,49 @@ mod tests {
         )
         .await
         .unwrap();
-        let help = process::capture(
-            process::executable_command(&binary, &["install".into(), "--help".into()]),
-            std::time::Duration::from_secs(30),
-        )
-        .unwrap();
+        let mut help_command =
+            process::executable_command(&binary, &["install".into(), "--help".into()]);
+        isolate(&mut help_command);
+        let help = process::capture(help_command, std::time::Duration::from_secs(30)).unwrap();
         let force_supported = help.stdout.split_whitespace().any(|word| word == "--force");
         println!("bootstrap={bootstrap_version}; --force={force_supported}");
-        for reinstall in [false, true] {
+        println!("install help: {}", crate::storage::redact(&help.stdout));
+        for (target, reinstall) in [
+            (&target, false),
+            (&target, true),
+            (&older, false),
+            (&target, false),
+        ] {
             let mut args = vec!["install".into(), target.manifest.version.clone()];
             if reinstall && force_supported {
                 args.push("--force".into());
             }
             let mut command = process::executable_command(&binary, &args);
-            command.env("DISABLE_AUTOUPDATER", "1");
-            command.env(
-                "CLAUDE_CONFIG_DIR",
-                temporary.path().join("claude-settings"),
-            );
-            crate::platform::apply_fresh_user_path(&mut command).unwrap();
+            isolate(&mut command);
             let output = process::capture(command, std::time::Duration::from_secs(600)).unwrap();
             println!(
                 "reinstall={reinstall}; exit={}; {}",
                 output.code,
-                crate::storage::redact(&output.stdout)
+                crate::storage::redact(&format!("{}\n{}", output.stdout, output.stderr))
             );
-            assert_eq!(process::version(&launcher).as_deref(), Some("2.1.326"));
+            let mut version_command = process::executable_command(&launcher, &["--version".into()]);
+            isolate(&mut version_command);
+            let version_output =
+                process::capture(version_command, std::time::Duration::from_secs(30)).unwrap();
+            assert_eq!(
+                process::parse_version(&version_output.stdout).as_deref(),
+                Some(target.manifest.version.as_str())
+            );
             let (_, artifact) =
                 windows_artifact(&target.manifest, &crate::platform::native_architecture())
                     .unwrap();
             verify_digest(&launcher, artifact).unwrap();
             verify_authenticode(&launcher).unwrap();
+            assert_eq!(
+                process::fingerprint(&original_launcher),
+                original_fingerprint,
+                "isolated installation touched the runner's original launcher"
+            );
         }
     }
 }

@@ -408,10 +408,10 @@ fn delete_credentials(target: &str) -> Result<(), String> {
     use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
     use windows_sys::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
     let target: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
-    if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
-        if std::io::Error::last_os_error().raw_os_error() != Some(ERROR_NOT_FOUND as i32) {
-            return Err("删除代理凭据失败".into());
-        }
+    if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0
+        && std::io::Error::last_os_error().raw_os_error() != Some(ERROR_NOT_FOUND as i32)
+    {
+        return Err("删除代理凭据失败".into());
     }
     Ok(())
 }

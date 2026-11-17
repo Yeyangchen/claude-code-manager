@@ -46,15 +46,27 @@ pub struct Manager {
     scan_cache: Mutex<Option<(Instant, discovery::Discovery)>>,
     startup_warning: Mutex<Option<String>>,
     read_only: AtomicBool,
+    owns_task: AtomicBool,
 }
 
 impl Manager {
     pub fn new(data_dir: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+        let startup_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(data_dir.join("operation.lock"))
+            .map_err(|e| e.to_string())?;
+        let can_recover = startup_lock.try_lock().is_ok();
         let loaded = storage::read_json::<TaskHistory>(&data_dir.join("tasks.json"))?;
         let settings = storage::read_json::<Settings>(&data_dir.join("settings.json"))?;
         let mut history = loaded.value;
         for operation in &mut history.operations {
+            if !can_recover {
+                break;
+            }
             if operation.status == "running"
                 && operation.kind == "manager-update"
                 && operation.target_version.as_deref() == Some(env!("CARGO_PKG_VERSION"))
@@ -80,8 +92,9 @@ impl Manager {
             scan_cache: Mutex::new(None),
             startup_warning: Mutex::new(None),
             read_only: AtomicBool::new(loaded.read_only || settings.read_only),
+            owns_task: AtomicBool::new(false),
         };
-        if !manager.read_only.load(Ordering::Relaxed) {
+        if can_recover && !manager.read_only.load(Ordering::Relaxed) {
             manager.persist_history()?;
         }
         Ok(manager)
@@ -152,6 +165,7 @@ impl Manager {
     }
 
     pub fn snapshot(&self) -> Result<Snapshot, String> {
+        self.refresh_external_history()?;
         let discovery = self.discovery(false)?;
         self.recover_interrupted(&discovery)?;
         let settings = self.settings()?;
@@ -270,6 +284,9 @@ impl Manager {
                         .any(|i| i.source == Source::Native)
                 {
                     return Err("已存在原生安装，请选择该实例进行更新或重装".into());
+                }
+                if request.kind == "install" {
+                    validate_native_destination(&platform::user_home()?, true)?;
                 }
                 if request.kind != "install" && installation.is_none() {
                     return Err("请选择安装实例".into());
@@ -397,6 +414,9 @@ impl Manager {
             "path-repair" => {
                 preview.title = "修复用户级 PATH".into();
                 let change = if let Some(install) = installation {
+                    if install.source == Source::External {
+                        return Err("无法确认来源的实例不参与自动 PATH 修复".into());
+                    }
                     let directories = discovery
                         .installations
                         .iter()
@@ -409,8 +429,24 @@ impl Manager {
                             .parent()
                             .ok_or("安装路径无父目录")?,
                     )?
-                } else {
+                } else if discovery
+                    .installations
+                    .iter()
+                    .any(|i| i.source == Source::Native)
+                {
                     path_edit::preview_append_native()?
+                } else {
+                    // A missing default native directory is the only unselected
+                    // cleanup target. Existing shared directories are retained.
+                    let native_bin = platform::user_home()?.join(".local/bin");
+                    if native_bin.exists() {
+                        return Err("未发现原生安装，请选择已识别实例修复 PATH".into());
+                    }
+                    let change = path_edit::preview_remove_missing(&[native_bin])?;
+                    if change.before.value == change.after.value {
+                        return Err("未发现可安全修复的原生 PATH 条目，请先选择安装实例".into());
+                    }
+                    change
                 };
                 preview.changes.push(PlanChange {
                     name: "HKCU Environment Path".into(),
@@ -556,6 +592,7 @@ impl Manager {
         file.try_lock()
             .map_err(|_| "另一个管理器操作正在执行，请等待完成")?;
         self.ensure_writable()?;
+        self.refresh_external_history()?;
         let interrupted = self
             .history
             .lock()
@@ -576,6 +613,31 @@ impl Manager {
     }
 
     fn recover_interrupted(&self, discovery: &discovery::Discovery) -> Result<(), String> {
+        if self.owns_task.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let guard = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.data_dir.join("operation.lock"))
+            .map_err(|e| e.to_string())?;
+        if guard.try_lock().is_err() {
+            return Ok(());
+        }
+        {
+            let mut history = self.history.lock().map_err(|_| "任务状态锁异常")?;
+            for operation in history
+                .operations
+                .iter_mut()
+                .filter(|o| o.status == "running")
+            {
+                operation.status = "attention".into();
+                operation.phase = "recovering".into();
+                operation.cancellable = false;
+            }
+        }
         let interrupted = self
             .history
             .lock()
@@ -631,6 +693,7 @@ impl Manager {
     }
 
     pub fn operation(&self, id: &str) -> Result<Operation, String> {
+        self.refresh_external_history()?;
         self.history
             .lock()
             .map_err(|_| "任务状态锁异常")?
@@ -666,6 +729,9 @@ impl Manager {
     }
 
     pub fn cancel(&self, id: &str) -> Result<Operation, String> {
+        if !self.owns_task.load(Ordering::Relaxed) {
+            return Err("任务在另一个管理器窗口执行，请在发起窗口取消".into());
+        }
         let operation = self.operation(id)?;
         if !operation.cancellable || operation.status != "running" {
             return Err("当前安装阶段需要完成后再操作".into());
@@ -719,6 +785,7 @@ impl Manager {
             child_pid: None,
         };
         let cancelled = Arc::new(AtomicBool::new(false));
+        self.owns_task.store(true, Ordering::Relaxed);
         self.cancelled
             .lock()
             .map_err(|_| "任务状态锁异常")?
@@ -728,7 +795,16 @@ impl Manager {
             history.operations.insert(0, operation.clone());
             history.operations.truncate(100);
         }
-        self.persist_history()?;
+        if let Err(error) = self.persist_history() {
+            self.owns_task.store(false, Ordering::Relaxed);
+            if let Ok(mut history) = self.history.lock() {
+                history.operations.retain(|o| o.id != operation.id);
+            }
+            if let Ok(mut cancelled) = self.cancelled.lock() {
+                cancelled.remove(&operation.id);
+            }
+            return Err(error);
+        }
         let manager = self.clone();
         let id = operation.id.clone();
         tauri::async_runtime::spawn(async move {
@@ -764,6 +840,7 @@ impl Manager {
             if let Ok(mut cancelled) = manager.cancelled.lock() {
                 cancelled.remove(&id);
             }
+            manager.owns_task.store(false, Ordering::Relaxed);
         });
         Ok(operation)
     }
@@ -928,6 +1005,7 @@ impl Manager {
                 }
             }
             None => {
+                validate_native_destination(&platform::user_home()?, true)?;
                 if discovery
                     .installations
                     .iter()
@@ -1117,7 +1195,7 @@ impl Manager {
             let Some(actual) = actual else {
                 return Err(format!("安装器退出码 {exit_code}，未发现目标安装。请检查日志并使用安装入口修复。"));
             };
-            let reported = process::version(Path::new(&actual.path)).or_else(|| actual.version.clone());
+            let reported = process::version(Path::new(&actual.path));
             if reported.as_deref() != Some(&version) {
                 return Err(format!("安装器退出码 {exit_code}，当前实际版本为 {}，目标为 {version}。请重新检测后重试或重装旧版本。", reported.unwrap_or_else(|| "不可用".into())));
             }
@@ -1201,6 +1279,28 @@ impl Manager {
     pub fn changes(&self) -> Result<Vec<ChangeEntry>, String> {
         let mut entries = Vec::new();
         for change in path_edit::list_changes(&self.data_dir)? {
+            let current = path_edit::read_user_path()?;
+            let display = |value: &path_edit::RawPathValue| {
+                if value.exists {
+                    value.value.clone()
+                } else {
+                    "(不存在)".into()
+                }
+            };
+            let comparison = vec![
+                ChangeComparison {
+                    name: "用户 PATH".into(),
+                    before: display(&change.before),
+                    written: display(&change.after),
+                    current: display(&current),
+                },
+                ChangeComparison {
+                    name: "注册表值类型".into(),
+                    before: change.before.value_type.to_string(),
+                    written: change.after.value_type.to_string(),
+                    current: current.value_type.to_string(),
+                },
+            ];
             let can_restore = change.state != "restored"
                 && path_edit::preview_restore(&self.data_dir, &change.id).is_ok();
             entries.push(ChangeEntry {
@@ -1215,9 +1315,44 @@ impl Manager {
                 } else {
                     "已还原或当前值发生变化，请查看差异".into()
                 },
+                comparison,
             });
         }
         for change in policy::list_changes(&self.data_dir)? {
+            let current = storage::read_bytes(Path::new(&change.settings_path))
+                .and_then(|bytes| {
+                    bytes
+                        .map(|b| {
+                            serde_json::from_slice::<serde_json::Value>(&b)
+                                .map_err(|_| "当前设置 JSON 无法解析".to_string())
+                        })
+                        .transpose()
+                })
+                .map(|value| value.unwrap_or_default());
+            let comparison = change
+                .fields
+                .iter()
+                .map(|field| ChangeComparison {
+                    name: field.pointer.clone(),
+                    before: field
+                        .before
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "(未设置)".into()),
+                    written: field
+                        .after
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "(未设置)".into()),
+                    current: match current.as_ref() {
+                        Ok(value) => value
+                            .pointer(&field.pointer)
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "(未设置)".into()),
+                        Err(error) => format!("无法读取：{error}"),
+                    },
+                })
+                .collect();
             let can_restore = change.state != "restored"
                 && policy::preview_restore(&self.data_dir, &change.id).is_ok();
             entries.push(ChangeEntry {
@@ -1232,6 +1367,7 @@ impl Manager {
                 } else {
                     "已还原或字段被再次修改".into()
                 },
+                comparison,
             });
         }
         entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -1341,6 +1477,7 @@ impl Manager {
             return Err("管理器更新必须高于当前版本".into());
         }
         let lock = self.operation_lock()?;
+        self.owns_task.store(true, Ordering::Relaxed);
         let operation = Operation {
             id: uuid::Uuid::new_v4().to_string(),
             kind: "manager-update".into(),
@@ -1362,7 +1499,13 @@ impl Manager {
             history.operations.insert(0, operation.clone());
             history.operations.truncate(100);
         }
-        self.persist_history()?;
+        if let Err(error) = self.persist_history() {
+            self.owns_task.store(false, Ordering::Relaxed);
+            if let Ok(mut history) = self.history.lock() {
+                history.operations.retain(|o| o.id != operation.id);
+            }
+            return Err(error);
+        }
         let manager = self.clone();
         let id = operation.id.clone();
         tauri::async_runtime::spawn(async move {
@@ -1425,11 +1568,15 @@ impl Manager {
                     o.result = Some(message);
                 });
             }
+            manager.owns_task.store(false, Ordering::Relaxed);
         });
         Ok(operation)
     }
 
     pub fn prevent_close_while_active(&self, app: &tauri::AppHandle) -> bool {
+        if !self.owns_task.load(Ordering::Relaxed) {
+            return false;
+        }
         let active = self.history.lock().ok().and_then(|h| {
             h.operations
                 .iter()
@@ -1445,6 +1592,18 @@ impl Manager {
             return true;
         }
         false
+    }
+
+    fn refresh_external_history(&self) -> Result<(), String> {
+        if self.owns_task.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let loaded = storage::read_json::<TaskHistory>(&self.data_dir.join("tasks.json"))?;
+        if loaded.read_only {
+            self.read_only.store(true, Ordering::Relaxed);
+        }
+        *self.history.lock().map_err(|_| "任务状态锁异常")? = loaded.value;
+        Ok(())
     }
 }
 
@@ -1512,6 +1671,7 @@ fn uninstall_native(installation: &Installation) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let launcher = home.join(".local/bin/claude.exe");
     let versions = home.join(".local/share/claude");
+    validate_native_destination(&home, false)?;
     let parent = launcher.parent().ok_or("原生安装路径缺少父目录")?;
     if parent.canonicalize().map_err(|e| e.to_string())? != parent {
         return Err("原生启动目录包含重解析路径，停止自动卸载".into());
@@ -1531,6 +1691,46 @@ fn uninstall_native(installation: &Installation) -> Result<(), String> {
     if versions.exists() {
         std::fs::remove_dir_all(&versions)
             .map_err(|e| format!("启动文件已移除，版本目录清理失败: {e}"))?;
+    }
+    Ok(())
+}
+
+fn validate_native_destination(home: &Path, require_empty: bool) -> Result<(), String> {
+    let home = home.canonicalize().map_err(|e| e.to_string())?;
+    let normalize = |path: &Path| {
+        path.to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('/', "\\")
+            .to_lowercase()
+    };
+    for relative in [
+        ".local",
+        ".local/bin",
+        ".local/share",
+        ".local/share/claude",
+    ] {
+        let path = home.join(relative);
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {
+                let actual = path
+                    .canonicalize()
+                    .map_err(|_| "原生安装目录包含失效的重解析路径")?;
+                if normalize(&actual) != normalize(&path) {
+                    return Err("原生安装目录重定向到预期用户目录之外，请手动核查".into());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("无法核查原生安装目录：{error}")),
+        }
+    }
+    if require_empty {
+        match std::fs::symlink_metadata(home.join(".local/bin/claude.exe")) {
+            Ok(_) => {
+                return Err("默认启动文件已存在但未确认归属，请选择已识别实例重装或手动核查".into())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("无法核查默认启动文件：{error}")),
+        }
     }
     Ok(())
 }
@@ -1606,6 +1806,39 @@ mod tests {
     }
 
     #[test]
+    fn opening_second_manager_does_not_recover_or_overwrite_live_task() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = Manager::new(directory.path().to_path_buf()).unwrap();
+        let guard = manager.operation_lock().unwrap();
+        let operation = Operation {
+            id: "live-task".into(),
+            kind: "update".into(),
+            title: "fixture".into(),
+            phase: "installing".into(),
+            status: "running".into(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            finished_at: None,
+            messages: vec![],
+            cancellable: false,
+            progress: None,
+            result: None,
+            installation_id: None,
+            target_version: Some("2.1.326".into()),
+            child_pid: None,
+        };
+        manager.history.lock().unwrap().operations.push(operation);
+        manager.persist_history().unwrap();
+        let bytes = std::fs::read(directory.path().join("tasks.json")).unwrap();
+        let observer = Manager::new(directory.path().to_path_buf()).unwrap();
+        assert_eq!(observer.operation("live-task").unwrap().status, "running");
+        assert_eq!(
+            std::fs::read(directory.path().join("tasks.json")).unwrap(),
+            bytes
+        );
+        drop(guard);
+    }
+
+    #[test]
     fn future_proxy_schema_turns_all_writes_read_only_without_overwriting() {
         let directory = tempfile::tempdir().unwrap();
         let manager = Manager::new(directory.path().to_path_buf()).unwrap();
@@ -1640,5 +1873,16 @@ mod tests {
         installation.version = None;
         assert_eq!(hold_drift(&baseline, &[installation]).len(), 1);
         assert_eq!(hold_drift(&baseline, &[]).len(), 1);
+    }
+
+    #[test]
+    fn fresh_native_install_does_not_overwrite_unknown_launcher() {
+        let directory = tempfile::tempdir().unwrap();
+        validate_native_destination(directory.path(), true).unwrap();
+        let launcher = directory.path().join(".local/bin/claude.exe");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, b"unknown owner").unwrap();
+        assert!(validate_native_destination(directory.path(), true).is_err());
+        assert_eq!(std::fs::read(launcher).unwrap(), b"unknown owner");
     }
 }

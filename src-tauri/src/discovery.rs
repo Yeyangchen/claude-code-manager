@@ -94,7 +94,6 @@ pub fn scan() -> Result<Discovery, String> {
                 "原生目录经重解析指向其他位置，无法确认归属，仅显示"
             },
             None,
-            None,
         ));
         if active.is_some_and(|p| !process::equivalent(p, &path)) {
             checks.push(check(
@@ -180,8 +179,10 @@ pub fn scan() -> Result<Discovery, String> {
                 scope,
                 active,
                 "npm 全局包，操作绑定当前 npm 与该 prefix",
-                Some(npm_path.to_string_lossy().into()),
-                Some(prefix.to_string_lossy().into()),
+                Some((
+                    npm_path.to_string_lossy().into(),
+                    prefix.to_string_lossy().into(),
+                )),
             ));
         }
     }
@@ -197,6 +198,47 @@ pub fn scan() -> Result<Discovery, String> {
             "未发现 WinGet，相关来源操作暂不可用。"
         },
     ));
+    let winget_records = match winget_records() {
+        Ok(records) => records,
+        Err(message) => {
+            checks.push(check(
+                "winget-ownership",
+                "WinGet 归属核查",
+                "warning",
+                &message,
+            ));
+            Vec::new()
+        }
+    };
+    for record in &winget_records {
+        let mut install = installation(
+            Source::Winget,
+            &record.executable,
+            process::version(&record.executable),
+            &record.scope,
+            active,
+            "WinGet portable 包，已核对卸载注册表、官方来源与安装路径",
+            None,
+        );
+        install.fingerprint = hex::encode(Sha256::digest(
+            format!("{}|{}", install.fingerprint, record.identity).as_bytes(),
+        ));
+        let ambiguous = winget_records
+            .iter()
+            .filter(|other| other.scope == record.scope)
+            .count()
+            > 1;
+        if winget.is_none() || ambiguous {
+            install.capabilities.upgrade = false;
+            install.capabilities.uninstall = false;
+            if ambiguous {
+                install
+                    .detail
+                    .push_str("；发现同范围多条注册记录，请先通过 WinGet 解决歧义");
+            }
+        }
+        installations.push(install);
+    }
     let roots = [
         (
             std::env::var_os("LOCALAPPDATA")
@@ -211,7 +253,7 @@ pub fn scan() -> Result<Discovery, String> {
             "machine",
         ),
     ];
-    for (root, scope) in roots {
+    for (root, _scope) in roots {
         let Some(root) = root else { continue };
         let Ok(entries) = std::fs::read_dir(root) else {
             continue;
@@ -225,21 +267,23 @@ pub fn scan() -> Result<Discovery, String> {
                 continue;
             }
             let executable = entry.path().join("claude.exe");
-            if executable.is_file() {
-                let mut install = installation(
-                    Source::Winget,
+            if executable.is_file()
+                && !winget_records.iter().any(|record| {
+                    process::equivalent(
+                        &record.executable.to_string_lossy(),
+                        &executable.to_string_lossy(),
+                    )
+                })
+            {
+                let install = installation(
+                    Source::External,
                     &executable,
-                    process::version(&executable),
-                    scope,
-                    active,
-                    "WinGet portable 包",
                     None,
+                    "unknown",
+                    active,
+                    "位于 WinGet 目录，但未能核实官方来源注册记录与安装路径，仅显示",
                     None,
                 );
-                if winget.is_none() {
-                    install.capabilities.upgrade = false;
-                    install.capabilities.uninstall = false;
-                }
                 installations.push(install);
             }
         }
@@ -270,7 +314,6 @@ pub fn scan() -> Result<Discovery, String> {
                 "unknown",
                 active,
                 "其他程序、IDE 私有 CLI 或应用执行别名，仅显示归属",
-                None,
                 None,
             ));
         }
@@ -311,6 +354,121 @@ fn check(id: &str, title: &str, level: &str, message: &str) -> Check {
     }
 }
 
+struct WingetRecord {
+    executable: PathBuf,
+    scope: String,
+    identity: String,
+}
+
+fn valid_winget_record(
+    package: &str,
+    source: &str,
+    installer_type: &str,
+    location: &Path,
+    executable: &Path,
+) -> bool {
+    if package != "Anthropic.ClaudeCode"
+        || source != "Microsoft.Winget.Source_8wekyb3d8bbwe"
+        || installer_type != "portable"
+        || !location.is_absolute()
+        || !executable.is_file()
+        || !executable
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("claude.exe"))
+    {
+        return false;
+    }
+    location
+        .canonicalize()
+        .ok()
+        .zip(executable.canonicalize().ok())
+        .is_some_and(|(location, executable)| {
+            executable.parent().is_some_and(|parent| {
+                lexical_path(&parent.to_string_lossy()) == lexical_path(&location.to_string_lossy())
+            })
+        })
+}
+
+#[cfg(windows)]
+fn winget_records() -> Result<Vec<WingetRecord>, String> {
+    use winreg::{
+        enums::{
+            HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
+        },
+        RegKey,
+    };
+    let mut records = Vec::new();
+    let mut seen = HashSet::new();
+    for (hive, scope) in [(HKEY_CURRENT_USER, "user"), (HKEY_LOCAL_MACHINE, "machine")] {
+        for view in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+            let root = match RegKey::predef(hive).open_subkey_with_flags(
+                "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+                KEY_READ | view,
+            ) {
+                Ok(root) => root,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    return Err("无法读取 WinGet 卸载记录，未核实的目录仅以只读方式显示".into())
+                }
+            };
+            for name in root.enum_keys() {
+                let name = name.map_err(|_| "无法完整枚举 WinGet 卸载记录")?;
+                let Ok(key) = root.open_subkey(&name) else {
+                    continue;
+                };
+                let package = key
+                    .get_value::<String, _>("WinGetPackageIdentifier")
+                    .unwrap_or_default();
+                if package != "Anthropic.ClaudeCode" {
+                    continue;
+                }
+                let source = key
+                    .get_value::<String, _>("WinGetSourceIdentifier")
+                    .unwrap_or_default();
+                let installer_type = key
+                    .get_value::<String, _>("WinGetInstallerType")
+                    .unwrap_or_default();
+                let location_text = key
+                    .get_value::<String, _>("InstallLocation")
+                    .unwrap_or_default();
+                let location = PathBuf::from(&location_text);
+                let target_text = key
+                    .get_value::<String, _>("PortableTargetFullPath")
+                    .unwrap_or_default();
+                let executable = if target_text.is_empty() {
+                    location.join("claude.exe")
+                } else {
+                    PathBuf::from(&target_text)
+                };
+                if !valid_winget_record(&package, &source, &installer_type, &location, &executable)
+                {
+                    continue;
+                }
+                let canonical = executable
+                    .canonicalize()
+                    .map_err(|_| "WinGet 安装路径在读取期间改变")?;
+                if !seen.insert(format!(
+                    "{scope}|{}",
+                    lexical_path(&canonical.to_string_lossy())
+                )) {
+                    continue;
+                }
+                records.push(WingetRecord {
+                    executable,
+                    scope: scope.into(),
+                    identity: format!("{scope}|{name}|{package}|{source}|{installer_type}|{location_text}|{target_text}"),
+                });
+            }
+        }
+    }
+    Ok(records)
+}
+
+#[cfg(not(windows))]
+fn winget_records() -> Result<Vec<WingetRecord>, String> {
+    Ok(Vec::new())
+}
+
 fn installation(
     source: Source,
     path: &Path,
@@ -318,9 +476,11 @@ fn installation(
     scope: &str,
     active: Option<&String>,
     detail: &str,
-    npm_path: Option<String>,
-    prefix: Option<String>,
+    npm_environment: Option<(String, String)>,
 ) -> Installation {
+    let (npm_path, prefix) = npm_environment
+        .map(|(path, prefix)| (Some(path), Some(prefix)))
+        .unwrap_or_default();
     let path_text = path.to_string_lossy().to_string();
     let manageable = source != Source::External && scope == "user";
     let native = source == Source::Native;
@@ -618,5 +778,35 @@ mod tests {
         std::fs::create_dir_all(outsider.parent().unwrap()).unwrap();
         std::fs::write(&outsider, b"fixture").unwrap();
         assert!(!native_install_owned(temporary.path(), &outsider));
+    }
+
+    #[test]
+    fn winget_requires_official_registry_identity_and_matching_location() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("claude.exe");
+        std::fs::write(&executable, b"fixture").unwrap();
+        let valid = |package, source, location| {
+            valid_winget_record(package, source, "portable", location, &executable)
+        };
+        assert!(valid(
+            "Anthropic.ClaudeCode",
+            "Microsoft.Winget.Source_8wekyb3d8bbwe",
+            temporary.path()
+        ));
+        assert!(!valid(
+            "Anthropic.ClaudeCode",
+            "untrusted.source",
+            temporary.path()
+        ));
+        assert!(!valid(
+            "Other.Package",
+            "Microsoft.Winget.Source_8wekyb3d8bbwe",
+            temporary.path()
+        ));
+        assert!(!valid(
+            "Anthropic.ClaudeCode",
+            "Microsoft.Winget.Source_8wekyb3d8bbwe",
+            &temporary.path().join("elsewhere")
+        ));
     }
 }

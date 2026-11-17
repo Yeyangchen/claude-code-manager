@@ -226,4 +226,26 @@ describe('desktop management workflows', () => {
     await act(async () => { returnExecution?.(runningOperation); });
     expect(await screen.findByText('已经验证成功')).toBeVisible();
   });
+
+  it('keeps the three-way comparison readable when a conflict blocks restoration', async () => {
+    const api = createApi();
+    vi.mocked(api.getChanges).mockResolvedValue([{
+      id: 'path-conflict', kind: 'path', description: '用户 PATH 更改', createdAt: '2026-11-16T12:00:00Z',
+      restored: false, canRestore: false, detail: '当前值存在外部修改，请查看差异。',
+      comparison: [{ name: 'HKCU Environment Path', before: 'C:\\original', written: 'C:\\original;C:\\manager', current: 'C:\\original;C:\\external' }],
+    }]);
+    const user = userEvent.setup();
+    render(<App api={api} />);
+    await user.click(await screen.findByRole('button', { name: '设置' }));
+    expect(await screen.findByRole('button', { name: '预览还原' })).toBeDisabled();
+    await user.click(screen.getByText('查看三方差异'));
+    expect(screen.getByText('原值')).toBeVisible();
+    expect(screen.getByText('管理器写入值')).toBeVisible();
+    expect(screen.getByText('当前值')).toBeVisible();
+    expect(screen.getByText('C:\\original')).toBeVisible();
+    expect(screen.getByText('C:\\original;C:\\manager')).toBeVisible();
+    expect(screen.getByText('C:\\original;C:\\external')).toBeVisible();
+    expect(api.createPlan).not.toHaveBeenCalled();
+    expect(api.executePlan).not.toHaveBeenCalled();
+  });
 });

@@ -231,7 +231,16 @@ summary { cursor: pointer; color: var(--muted); }
 .theme-option.selected { border-color: var(--accent-border); color: var(--accent); background: var(--accent-soft); }
 .proxy-fields { margin-top: 19px; }
 .saved-label { color: var(--success); font-size: 11px; }
-.change-entry { display: flex; gap: 15px; justify-content: space-between; align-items: center; padding: 14px 0; }
+.change-entry { padding: 14px 0; }
+.change-entry-main { display: flex; gap: 15px; justify-content: space-between; align-items: center; }
+.change-comparison summary { cursor: pointer; color: var(--accent); font-size: 11px; }
+.comparison-item { margin-top: 15px; }
+.comparison-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 9px 0 0; }
+.comparison-values > div { min-width: 0; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 5px; }
+.comparison-values dt { color: var(--muted); font-size: 10px; }
+.comparison-values dd { margin: 5px 0 0; }
+.comparison-values pre { margin: 0; max-height: 160px; overflow: auto; font-size: 11px; }
+@media (max-width: 1080px) { .comparison-values { grid-template-columns: 1fr; } }
 .change-entry + .change-entry { border-top: 1px solid var(--border); }
 .change-entry strong { font-size: 12px; }
 .change-entry p { margin-top: 4px; font-size: 10px; color: var(--muted); }

@@ -1,6 +1,10 @@
 // Source-language message IDs follow the gettext convention.
 // Add translations here without changing feature components.
 export const zhCN = {
+  "查看三方差异": "查看三方差异",
+  "原值": "原值",
+  "管理器写入值": "管理器写入值",
+  "当前值": "当前值",
   "预览重新安装": "预览重新安装",
   "已发现安装文件，但无法读取版本。重新安装前会复核该实例及官方产物。": "已发现安装文件，但无法读取版本。重新安装前会复核该实例及官方产物。",
   "预览保留项 PATH 修复": "预览保留项 PATH 修复",

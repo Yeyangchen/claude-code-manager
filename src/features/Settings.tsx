@@ -84,7 +84,10 @@ export function Settings({ api, snapshot, disabled, onPlan, onSettingsSaved, onE
     <Panel title={t("还原管理器所做的更改")} action={<RotateCcw size={18} className="muted"/>}>
       <p className="panel-description first-description">{t("卸载管理器前，可在这里还原更新策略与 PATH。还原前会比较当前值，保留之后发生的外部改动。")}</p>
       <Notice>{t("卸载管理器不会自动还原 PATH 或更新策略。请先逐项还原；卸载时若选择删除应用数据，变更台账也会被删除。")}</Notice>
-      {changes.length ? <div className="change-list">{changes.map((change) => <div className="change-entry" key={change.id}><div><strong>{change.description}</strong><p>{displayDate(change.createdAt)} · {change.detail}</p></div>{change.restored ? <Badge tone="success">{t("已还原")}</Badge> : <button className="button secondary small-button" disabled={disabled || !change.canRestore} onClick={() => onPlan({ kind: 'restore-change', changeId: change.id })}>{t("预览还原")}</button>}</div>)}</div> : <Empty title={t("暂无可还原更改")}>{t("管理器写入的策略与 PATH 更改会显示在这里。")}</Empty>}
+      {changes.length ? <div className="change-list">{changes.map((change) => <div className="change-entry" key={change.id}>
+        <div className="change-entry-main"><div><strong>{change.description}</strong><p>{displayDate(change.createdAt)} · {change.detail}</p></div>{change.restored ? <Badge tone="success">{t("已还原")}</Badge> : <button className="button secondary small-button" disabled={disabled || !change.canRestore} onClick={() => onPlan({ kind: 'restore-change', changeId: change.id })}>{t("预览还原")}</button>}</div>
+        {!!change.comparison?.length && <details className="details-box change-comparison"><summary>{t("查看三方差异")}</summary>{change.comparison.map((comparison, index) => <section key={`${comparison.name}-${index}`} className="comparison-item"><h3>{comparison.name}</h3><dl className="comparison-values"><div><dt>{t("原值")}</dt><dd><pre>{comparison.before || t("未设置")}</pre></dd></div><div><dt>{t("管理器写入值")}</dt><dd><pre>{comparison.written || t("未设置")}</pre></dd></div><div><dt>{t("当前值")}</dt><dd><pre>{comparison.current || t("未设置")}</pre></dd></div></dl></section>)}</details>}
+      </div>)}</div> : <Empty title={t("暂无可还原更改")}>{t("管理器写入的策略与 PATH 更改会显示在这里。")}</Empty>}
     </Panel>
 
     <Panel title={t("关于 Claude Code Manager")} action={<Badge>v{snapshot.appVersion}</Badge>}>

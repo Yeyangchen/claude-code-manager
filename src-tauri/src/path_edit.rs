@@ -33,11 +33,13 @@ pub struct PathChange {
 }
 
 pub fn decode_registry_string(bytes: &[u8]) -> Result<String, String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err("PATH 注册表值含无效 UTF-16 数据".into());
     }
     let mut words: Vec<u16> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
         .collect();
     if words.last() == Some(&0) {
@@ -90,8 +92,12 @@ fn normalized_entry(entry: &str) -> String {
         .to_lowercase()
 }
 
-fn matching_entry(entry: &str, directory: &Path) -> bool {
-    let expanded = platform::expand_environment(entry).unwrap_or_else(|_| entry.into());
+fn matching_entry(entry: &str, directory: &Path, expand: bool) -> bool {
+    let expanded = if expand {
+        platform::expand_environment(entry).unwrap_or_else(|_| entry.into())
+    } else {
+        entry.into()
+    };
     normalized_entry(&expanded) == normalized_entry(&directory.to_string_lossy())
 }
 
@@ -102,7 +108,8 @@ pub fn preview_append_native() -> Result<PathChange, String> {
 
 pub fn append_native_to(before: &RawPathValue, native: &Path) -> Result<PathChange, String> {
     let already_present = before.value.split(';').any(|entry| {
-        normalized_entry(entry) == "%userprofile%\\.local\\bin" || matching_entry(entry, native)
+        (before.value_type == 2 && normalized_entry(entry) == "%userprofile%\\.local\\bin")
+            || matching_entry(entry, native, before.value_type == 2)
     });
     let mut after = before.clone();
     if !already_present {
@@ -154,13 +161,13 @@ pub fn prefer_in(
         .filter_map(|(index, entry)| {
             known_directories
                 .iter()
-                .any(|directory| matching_entry(entry, directory))
+                .any(|directory| matching_entry(entry, directory, before.value_type == 2))
                 .then_some(index)
         })
         .collect();
     if let Some(preferred_index) = slots
         .iter()
-        .position(|index| matching_entry(&entries[*index], preferred))
+        .position(|index| matching_entry(&entries[*index], preferred, before.value_type == 2))
     {
         let mut related: Vec<String> = slots.iter().map(|index| entries[*index].clone()).collect();
         let preferred_entry = related.remove(preferred_index);
@@ -192,9 +199,9 @@ pub fn preview_remove_missing(known_directories: &[PathBuf]) -> Result<PathChang
         .value
         .split(';')
         .filter(|entry| {
-            !known_directories
-                .iter()
-                .any(|directory| matching_entry(entry, directory) && !directory.exists())
+            !known_directories.iter().any(|directory| {
+                matching_entry(entry, directory, before.value_type == 2) && !directory.exists()
+            })
         })
         .collect();
     let after = RawPathValue {
@@ -379,6 +386,15 @@ mod tests {
         let change = append_native_to(&before, Path::new("C:\\Users\\Test\\.local\\bin")).unwrap();
         assert_eq!(change.after.value_type, 1);
         assert!(!change.after.value.contains("%USERPROFILE%"));
+        let literal = RawPathValue {
+            value: "%USERPROFILE%\\.local\\bin".into(),
+            ..before
+        };
+        let change = append_native_to(&literal, Path::new("C:\\Users\\Test\\.local\\bin")).unwrap();
+        assert_eq!(
+            change.after.value,
+            "%USERPROFILE%\\.local\\bin;C:\\Users\\Test\\.local\\bin"
+        );
     }
 
     #[test]
@@ -412,5 +428,122 @@ mod tests {
             "C:\\Tools;C:\\native;C:\\Unrelated;C:\\npm;"
         );
         assert!(prefer_in(&before, &known, Path::new("C:\\Tools")).is_err());
+    }
+
+    /// Mutates the disposable hosted runner's HKCU only. Normal unit test runs
+    /// skip this test; even an explicit local --ignored invocation fails before
+    /// any registry access. The restore guard also runs during panic unwinding.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires explicitly opted-in disposable GitHub-hosted Windows runner"]
+    fn isolated_path_smoke() {
+        use winreg::{
+            enums::{HKEY_CURRENT_USER, KEY_SET_VALUE},
+            RegKey, RegValue,
+        };
+        assert!(
+            std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+                && std::env::var("CCM_RUN_INSTALL_SMOKE").as_deref() == Ok("1")
+                && std::env::var("RUNNER_ENVIRONMENT").as_deref() == Ok("github-hosted")
+                && std::env::var("RUNNER_OS").as_deref() == Ok("Windows"),
+            "registry smoke test is permitted only on an opted-in disposable GitHub-hosted Windows runner"
+        );
+
+        fn exact_value() -> std::io::Result<Option<RegValue>> {
+            let key = match RegKey::predef(HKEY_CURRENT_USER).open_subkey("Environment") {
+                Ok(key) => key,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            match key.get_raw_value("Path") {
+                Ok(value) => Ok(Some(value)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            }
+        }
+
+        struct RestoreOriginal(Option<RegValue>);
+        impl RestoreOriginal {
+            fn restore(&self) -> std::io::Result<()> {
+                let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
+                    .create_subkey_with_flags("Environment", KEY_SET_VALUE)?;
+                match &self.0 {
+                    Some(original) => key.set_raw_value("Path", original)?,
+                    None => match key.delete_value("Path") {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    },
+                }
+                platform::broadcast_environment_changed();
+                Ok(())
+            }
+        }
+        impl Drop for RestoreOriginal {
+            fn drop(&mut self) {
+                let _ = self.restore();
+            }
+        }
+
+        let restore_original = RestoreOriginal(exact_value().expect("read runner's original PATH"));
+        let before = read_user_path().expect("read raw PATH snapshot");
+        let directory = tempfile::tempdir().expect("create isolated ledger directory");
+        let change = preview_append_native().expect("preview native PATH append");
+        assert_eq!(change.before, before);
+        apply_change(directory.path(), &change).expect("apply PATH plan");
+        assert_eq!(read_user_path().unwrap(), change.after);
+        let expected_bytes: Vec<u8> = change
+            .after
+            .value
+            .encode_utf16()
+            .chain(Some(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let applied = exact_value().unwrap().expect("applied PATH exists");
+        assert_eq!(applied.vtype as u32, change.after.value_type);
+        assert!(
+            applied.bytes == expected_bytes,
+            "raw PATH bytes differ from preview"
+        );
+
+        let mut child = crate::process::ps("[Console]::Write($env:PATH)");
+        platform::apply_fresh_user_path(&mut child).expect("build fresh child PATH");
+        let output = crate::process::capture(child, std::time::Duration::from_secs(20))
+            .expect("probe newly spawned shell");
+        assert_eq!(output.code, 0);
+        assert!(
+            output.stdout == platform::effective_path().unwrap().trim(),
+            "new shell PATH did not match refreshed environment"
+        );
+
+        restore_change(directory.path(), &change.id).expect("restore first PATH change");
+        assert_eq!(read_user_path().unwrap(), before);
+        assert!(
+            exact_value().unwrap() == restore_original.0,
+            "restoration changed original registry bytes or type"
+        );
+
+        let conflict = preview_append_native().expect("preview second PATH change");
+        apply_change(directory.path(), &conflict).expect("apply second PATH plan");
+        let mut external = conflict.after.clone();
+        external
+            .value
+            .push_str(&format!(";C:\\CCM-Smoke-External-{}", uuid::Uuid::new_v4()));
+        write_user_path(&external).expect("simulate an external edit on isolated runner");
+        assert!(preview_restore(directory.path(), &conflict.id).is_err());
+        assert!(restore_change(directory.path(), &conflict.id).is_err());
+        assert_eq!(
+            read_user_path().unwrap(),
+            external,
+            "conflict handling overwrote external edit"
+        );
+
+        restore_original
+            .restore()
+            .expect("restore exact original runner PATH");
+        assert!(
+            exact_value().unwrap() == restore_original.0,
+            "final cleanup did not restore original raw PATH"
+        );
     }
 }

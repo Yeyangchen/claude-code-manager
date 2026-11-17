@@ -40,14 +40,14 @@ All functions return `Result<T, String>` unless stated. Structs are serializable
 - `mode` is official/manual/hold; source winget sets the package-manager auto-update field. Empty minimum_version clears the user-level pin; None preserves it.
 - `PolicySnapshot { settings_path, mode, channel, minimum_version: Option<String>, disabled_updates: bool, sources: Vec<PolicySource>, detail }`.
 - `PolicySource { name, value }` only includes update-related fields.
-- `PolicyChange { id, created_at: u64, settings_path, expected_fingerprint, fields: Vec<FieldChange>, mode, state }`.
+- `PolicyChange { id, created_at: u64, settings_path, expected_fingerprint, fields: Vec<FieldChange>, mode, state, held_versions: BTreeMap<String, String> }`. `held_versions` defaults to empty for older records; the manager fills installation IDs and versions when creating a hold plan.
 - `FieldChange { pointer, before: Option<Value>, after: Option<Value> }`.
 - `read_policy(data_dir: &Path) -> Result<PolicySnapshot, String>`.
 - `preview_policy(request: &PolicyRequest) -> Result<PolicyChange, String>`.
 - `apply_policy(data_dir, change: &PolicyChange)` / `restore_policy(data_dir, id)` return PolicyChange.
 - `preview_restore(data_dir, id)` and `list_changes(data_dir)` mirror path functions.
 - Records under `changes/policy` hold changed fields only. Full user settings and authentication data are never copied into manager backups.
-- Effective policy is inferred from inherited environment, user settings, known current-directory settings and readable managed-settings files. The snapshot clearly identifies other-project and server-managed scopes as requiring the actual installation's doctor output.
+- Effective policy is inferred from inherited environment, user settings, known current-directory settings, readable managed-settings files/drop-ins, and Windows HKLM/HKCU policy registry values. The snapshot clearly identifies other-project, helper-produced and server-managed scopes as requiring the actual installation's doctor output.
 
 ## proxy
 

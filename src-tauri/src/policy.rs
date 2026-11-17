@@ -423,7 +423,7 @@ fn records_dir(data_dir: &Path) -> PathBuf {
 
 pub fn apply_policy(data_dir: &Path, change: &PolicyChange) -> Result<PolicyChange, String> {
     let path = settings_path()?;
-    if path != PathBuf::from(&change.settings_path) {
+    if path != Path::new(&change.settings_path) {
         return Err("配置目录发生变化，请重新检测".into());
     }
     if storage::file_fingerprint(&path)? != change.expected_fingerprint {
@@ -476,7 +476,7 @@ pub fn preview_restore(data_dir: &Path, id: &str) -> Result<PolicyChange, String
     if !["prepared", "applied"].contains(&record.state.as_str()) {
         return Err("该策略变更已经撤销".into());
     }
-    if settings_path()? != PathBuf::from(&record.settings_path) {
+    if settings_path()? != Path::new(&record.settings_path) {
         return Err("该变更属于不同的 Claude 配置目录".into());
     }
     let current = read_settings(Path::new(&record.settings_path))?;

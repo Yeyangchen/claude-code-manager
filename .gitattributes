@@ -8,6 +8,7 @@
 *.sh text eol=lf
 *.ps1 text eol=crlf
 *.png binary
+*.jpg binary
 *.ico binary
 tests/fixtures/official-manifest.json -text
 tests/fixtures/official-manifest.json.sig -text

@@ -241,6 +241,15 @@ pub struct ChangeEntry {
     pub restored: bool,
     pub can_restore: bool,
     pub detail: String,
+    pub comparison: Vec<ChangeComparison>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChangeComparison {
+    pub name: String,
+    pub before: String,
+    pub written: String,
+    pub current: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

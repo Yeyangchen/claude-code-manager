@@ -134,6 +134,7 @@ export interface ChangeEntry {
   restored: boolean;
   canRestore: boolean;
   detail: string;
+  comparison?: { name: string; before: string; written: string; current: string }[];
 }
 
 export interface ManagerUpdate {

@@ -9,6 +9,10 @@
 
 当前版本为 **0.1.0-beta.1**。发布与验收状态见 [实际支持和验收记录](docs/compatibility.md)。未经验证的场景不会被标记为稳定支持。
 
+![开发预览界面，使用模拟数据](docs/images/overview-preview.jpg)
+
+*截图为开发预览，显示模拟安装实例。桌面版读取本机真实状态。*
+
 ## 下载
 
 从 [GitHub Releases](https://github.com/Yeyangchen/claude-code-manager/releases) 下载 Windows x64 安装包。开发构建可在 [Actions](https://github.com/Yeyangchen/claude-code-manager/actions) 中下载。

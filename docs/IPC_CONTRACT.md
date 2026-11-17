@@ -39,7 +39,7 @@ interface Plan {
   warnings: string[]; changes: { name: string; before: string; after: string }[];
   canExecute: boolean; manualCommand: string | null; checksumOnly: boolean;
 }
-interface ChangeEntry { id: string; kind: string; description: string; createdAt: string; restored: boolean; canRestore: boolean; detail: string }
+interface ChangeEntry { id: string; kind: string; description: string; createdAt: string; restored: boolean; canRestore: boolean; detail: string; comparison?: {name: string; before: string; written: string; current: string}[] }
 interface ManagerUpdate { currentVersion: string; latestVersion: string | null; available: boolean; downloadUrl: string; signedUpdaterReady: boolean; message: string }
 ```
 
@@ -57,7 +57,10 @@ interface ManagerUpdate { currentVersion: string; latestVersion: string | null; 
 | `export_diagnostics` | none | `{ path: string }` or `null` if dialog cancelled |
 | `open_url` | `{ url: string }` | `void` |
 | `check_manager_update` | none | `ManagerUpdate` |
+| `install_manager_update` | `{ expectedVersion: string }` | `Operation` |
 
 Subscribe to `manager://operation` for `Operation` snapshots and also poll `get_snapshot` after reloading the renderer. `execute_plan` returns immediately after the task starts. Cancel applies while waiting/preparing, not during an installer commit. Checksum-only native versions need explicit checkbox acknowledgment in the preview UI.
 
 Browser preview must display a clear preview indicator and use an isolated simulation adapter. The production desktop always invokes Rust.
+
+`checkIntervalHours: 0` means manual checks only. Manager updates require a separate confirmation of the concrete `expectedVersion`; a changed release feed invalidates that confirmation. A successful signed updater handoff closes the application, and startup reconciles the installed manager version. Hold-version drift is reported through a warning check with id `hold-version-drift`.

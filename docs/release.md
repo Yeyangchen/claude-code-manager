@@ -42,3 +42,11 @@ Release 草稿中现有附件不会被自动覆盖。同 tag 重跑仅补充缺�
 干净 Windows 10 / 11、WebView2 缺失、升级链路与杀毒扫描需要相应环境。结果记录到 `docs/compatibility.md`，不能以构建成功代替。
 
 参考：[Tauri updater](https://v2.tauri.app/plugin/updater/)、[Windows installer](https://v2.tauri.app/distribute/windows-installer/)。
+
+## 草稿地址与中断恢复
+
+GitHub 草稿可能返回 `untagged-…` 临时下载地址。上传阶段只允许与该 Release 的 `html_url` 对应的同仓库临时路径或正式 tag 路径，并严格核对文件名与摘要；`latest.json` 始终使用正式版本 URL。公开后再次核对每个附件的正式下载 URL。
+
+若上传在第一个安装包之后中断，允许从草稿取回该已核对 SHA256 的 CI 安装包，用同一发布密钥和 `tauri signer sign --app-version <version>` 补齐尚未上传的签名与元数据。必须保留原安装包字节、记录构建提交/工作流与恢复说明、完成独立验签和篡改拒绝检查。已有附件仍只能比对，不能覆盖；已存在不同内容时应创建新版本。
+
+beta.2 首次发布采用了上述补齐流程：CI 构建产物未改动，草稿 URL 检查修复后补齐缺失附件。具体构建记录与恢复声明在 Release 的 `provenance.json` 中。

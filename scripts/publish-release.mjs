@@ -3,10 +3,22 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { repository, sha256 } from './release.mjs'
 
-export function verifyAsset(asset, { name, digest, tag, existing = false }) {
+export function verifyAsset(asset, { name, digest, tag, existing = false, release }) {
+  if (release && release.tag_name !== tag) throw new Error('Release tag mismatch')
   if (asset.name !== name) throw new Error(`GitHub renamed release asset: expected ${name}, received ${asset.name}`)
   const expectedUrl = `https://github.com/${repository}/releases/download/${tag}/${encodeURIComponent(name)}`
-  if (asset.browser_download_url !== expectedUrl) throw new Error(`Release asset URL mismatch: ${name}`)
+  let draftUrl
+  if (release?.draft === true) {
+    try {
+      const page = new URL(release.html_url)
+      const prefix = `/${repository}/releases/tag/`
+      const slug = page.pathname.startsWith(prefix) ? page.pathname.slice(prefix.length) : ''
+      if (page.origin === 'https://github.com' && !page.username && !page.password && !page.search && !page.hash && /^untagged-[a-f0-9]+$/.test(slug)) {
+        draftUrl = `https://github.com/${repository}/releases/download/${slug}/${encodeURIComponent(name)}`
+      }
+    } catch { /* A malformed release URL cannot authorize a temporary asset URL. */ }
+  }
+  if (asset.browser_download_url !== expectedUrl && (!draftUrl || asset.browser_download_url !== draftUrl)) throw new Error(`Release asset URL mismatch: ${name}`)
   if (asset.digest !== `sha256:${digest}`) {
     throw new Error(existing
       ? `Refusing to replace existing asset with a different or unknown digest: ${name}`
@@ -48,14 +60,14 @@ export async function publishRelease({ root = process.cwd(), token, tag, fetchIm
     if (expected && expected !== digest) throw new Error(`Local artifact changed: ${name}`)
     const existing = release.assets.find((asset) => asset.name === name)
     if (existing) {
-      verifyAsset(existing, { name, digest, tag, existing: true })
+      verifyAsset(existing, { name, digest, tag, existing: true, release })
       console.log(`Verified existing asset: ${name}`)
       continue
     }
     const upload = release.upload_url.replace(/\{.*$/, '') + `?name=${encodeURIComponent(name)}`
     const response = await fetchImpl(upload, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/octet-stream' }, body: content })
     if (!response.ok) throw new Error(`Upload ${name} failed: HTTP ${response.status}`)
-    verifyAsset(await response.json(), { name, digest, tag })
+    verifyAsset(await response.json(), { name, digest, tag, release })
     console.log(`Uploaded and verified: ${name}`)
   }
   console.log(`Draft ready for installer validation: ${release.html_url}`)

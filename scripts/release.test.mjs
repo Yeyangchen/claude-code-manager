@@ -77,6 +77,31 @@ test('asset verification rejects GitHub renames and mismatched URLs even when by
   assert.throws(() => verifyAsset({ ...asset, browser_download_url: `https://example.com/${safeName}` }, { name: safeName, digest, tag }), /URL mismatch/)
 })
 
+test('draft validation accepts only the temporary slug belonging to the same release', () => {
+  const slug = 'untagged-72c2a4b548c652095992'
+  const release = { ...draft(), html_url: `https://github.com/${repository}/releases/tag/${slug}` }
+  const digest = sha256('installer-fixture')
+  const url = assetUrl(safeName).replace(`/download/${tag}/`, `/download/${slug}/`)
+  const asset = { name: safeName, browser_download_url: url, digest: `sha256:${digest}` }
+  verifyAsset(asset, { name: safeName, digest, tag, release })
+  verifyAsset({ ...asset, browser_download_url: assetUrl(safeName) }, { name: safeName, digest, tag, release })
+  assert.throws(() => verifyAsset({ ...asset, browser_download_url: url.replace(slug, 'untagged-deadbeef') }, { name: safeName, digest, tag, release }), /URL mismatch/)
+  assert.throws(() => verifyAsset({ ...asset, browser_download_url: url.replace(repository, 'other/repository') }, { name: safeName, digest, tag, release }), /URL mismatch/)
+  assert.throws(() => verifyAsset({ ...asset, name: `${safeName}.changed` }, { name: safeName, digest, tag, release }), /renamed/)
+  assert.throws(() => verifyAsset(asset, { name: safeName, digest, tag, release: { ...release, html_url: release.html_url.replace(repository, 'other/repository') } }), /URL mismatch/)
+  assert.throws(() => verifyAsset(asset, { name: safeName, digest, tag, release: { ...release, html_url: `${release.html_url}?redirect=1` } }), /URL mismatch/)
+  assert.throws(() => verifyAsset(asset, { name: safeName, digest, tag, release: { ...release, tag_name: 'v9.9.9' } }), /tag mismatch/)
+})
+
+test('published releases never accept a temporary draft URL', () => {
+  const slug = 'untagged-72c2a4b548c652095992'
+  const release = { ...draft(), draft: false, html_url: `https://github.com/${repository}/releases/tag/${slug}` }
+  const digest = sha256('installer-fixture')
+  const asset = { name: safeName, browser_download_url: assetUrl(safeName).replace(`/download/${tag}/`, `/download/${slug}/`), digest: `sha256:${digest}` }
+  assert.throws(() => verifyAsset(asset, { name: safeName, digest, tag, release }), /URL mismatch/)
+  verifyAsset({ ...asset, browser_download_url: assetUrl(safeName) }, { name: safeName, digest, tag, release })
+})
+
 test('publishing stops immediately if the upload response renames an asset', async (t) => {
   const { root } = await preparedFixture(t)
   let uploads = 0
@@ -103,15 +128,17 @@ test('same-name assets with different or unknown digests are never overwritten',
   }
 })
 
-test('an unchanged draft rerun verifies existing names, URLs and digests without uploading', async (t) => {
+test('an unchanged draft rerun verifies existing tag or temporary URLs without uploading', async (t) => {
   const { root, output, files } = await preparedFixture(t)
-  const assets = await Promise.all(files.map(async (name) => ({ name, browser_download_url: assetUrl(name), digest: `sha256:${sha256(await readFile(join(output, name)))}` })))
-  let calls = 0
-  const fetchImpl = async (_url, options = {}) => {
-    calls++
-    assert.equal(options.method, undefined)
-    return json([draft(assets)])
+  for (const slug of [tag, 'untagged-72c2a4b548c652095992']) {
+    const assets = await Promise.all(files.map(async (name) => ({ name, browser_download_url: assetUrl(name).replace(`/download/${tag}/`, `/download/${slug}/`), digest: `sha256:${sha256(await readFile(join(output, name)))}` })))
+    let calls = 0
+    const fetchImpl = async (_url, options = {}) => {
+      calls++
+      assert.equal(options.method, undefined)
+      return json([{ ...draft(assets), html_url: `https://github.com/${repository}/releases/tag/${slug}` }])
+    }
+    await publishRelease({ root, tag, token: 'fixture-token', fetchImpl })
+    assert.equal(calls, 1)
   }
-  await publishRelease({ root, tag, token: 'fixture-token', fetchImpl })
-  assert.equal(calls, 1)
 })

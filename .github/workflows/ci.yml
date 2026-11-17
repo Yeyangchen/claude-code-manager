@@ -30,6 +30,7 @@ jobs:
       - run: pnpm test
       - run: pnpm build
       - run: node scripts/check-project.mjs
+      - run: node scripts/check-security-exceptions.mjs
       - run: node --test scripts/release.test.mjs
       - run: pnpm audit --prod --audit-level high
 
@@ -51,8 +52,10 @@ jobs:
         with:
           workspaces: src-tauri
           shared-key: windows
+          cache-on-failure: true
       - run: pnpm install --frozen-lockfile
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - run: pnpm build
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - run: pnpm tauri:build --bundles nsis
@@ -75,9 +78,11 @@ jobs:
         with:
           workspaces: src-tauri
           shared-key: security
+          cache-on-failure: true
       - run: cargo install cargo-audit --version 0.23.0 --locked
       - run: cargo audit --file src-tauri/Cargo.lock
       - uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9
+        if: ${{ !cancelled() }}
         with:
           manifest-path: src-tauri/Cargo.toml
           command: check

@@ -8,6 +8,8 @@ Tauri updater 必须验证签名，不能关闭验证。公开密钥随源码分
 
 仓库 secrets：`TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
 
+本项目已生成发布密钥并配置上述 secrets。维护者本机的私钥与密码保存在 `%LOCALAPPDATA%\ClaudeCodeManagerPublisher`，目录权限限定为当前用户和 SYSTEM。公开密钥为 `src-tauri/resources/manager-updater.pub`。该本机目录不在仓库中，请将其另行加密备份。
+
 Windows Authenticode 证书另外配置。当前 beta 明确标记未做 Authenticode 签名。Tauri `.sig` 只证明更新包由项目发布者签发，不会消除 Windows SmartScreen 提示。
 
 ## 发布步骤

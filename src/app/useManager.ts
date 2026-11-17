@@ -13,14 +13,19 @@ export function useManager(injectedApi?: ManagerApi) {
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
 
+  const acceptOperation = useCallback((next: Operation) => {
+    setOperation((previous) => previous?.id === next.id && previous.status !== 'running' && next.status === 'running' ? previous : next);
+  }, []);
+
   const refresh = useCallback(async () => {
     if (!api) return;
     const next = await api.getSnapshot();
     if (!mounted.current) return;
     setSnapshot(next);
-    if (next.activeOperation) setOperation(next.activeOperation);
+    if (next.activeOperation) acceptOperation(next.activeOperation);
+    else setOperation((previous) => previous ? next.history.find((item) => item.id === previous.id) ?? previous : null);
     setLoading(false);
-  }, [api]);
+  }, [api, acceptOperation]);
 
   const checkReleases = useCallback(async (force = true) => {
     if (!api) return;
@@ -37,7 +42,7 @@ export function useManager(injectedApi?: ManagerApi) {
 
   useEffect(() => {
     mounted.current = true;
-    if (!injectedApi) getManagerApi().then(setApi).catch((failure) => {
+    if (!injectedApi) getManagerApi().then((next) => { if (mounted.current) setApi(next); }).catch((failure) => {
       if (mounted.current) { setError(errorMessage(failure)); setLoading(false); }
     });
     return () => { mounted.current = false; };
@@ -51,31 +56,39 @@ export function useManager(injectedApi?: ManagerApi) {
     void checkReleases(false);
     api.onOperation((next) => {
       if (disposed) return;
-      setOperation(next);
+      acceptOperation(next);
       if (next.status !== 'running') refresh().catch((failure) => setError(errorMessage(failure)));
     }).then((stop) => { if (disposed) stop(); else unsubscribe = stop; }).catch((failure) => {
       if (!disposed) setError(errorMessage(failure));
     });
     return () => { disposed = true; unsubscribe?.(); };
-  }, [api, refresh, checkReleases]);
+  }, [api, refresh, checkReleases, acceptOperation]);
 
   useEffect(() => {
     if (!api || operation?.status !== 'running') return;
+    let disposed = false;
+    let pending = false;
     const timer = window.setInterval(() => {
+      if (pending) return;
+      pending = true;
       api.getOperation(operation.id).then((next) => {
-        setOperation(next);
+        if (disposed) return;
+        acceptOperation(next);
         if (next.status !== 'running') refresh().catch((failure) => setError(errorMessage(failure)));
-      }).catch((failure) => setError(errorMessage(failure)));
+      }).catch((failure) => { if (!disposed) setError(errorMessage(failure)); }).finally(() => { pending = false; });
     }, 2000);
-    return () => window.clearInterval(timer);
-  }, [api, operation?.id, operation?.status, refresh]);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [api, operation?.id, operation?.status, refresh, acceptOperation]);
 
   const intervalHours = snapshot?.settings.checkIntervalHours;
   useEffect(() => {
     if (!intervalHours || intervalHours < 1) return;
-    const timer = window.setInterval(() => { void checkReleases(false); }, intervalHours * 3_600_000);
+    const timer = window.setInterval(() => {
+      void checkReleases(false);
+      void refresh().catch((failure) => { if (mounted.current) setError(errorMessage(failure)); });
+    }, intervalHours * 3_600_000);
     return () => window.clearInterval(timer);
-  }, [intervalHours, checkReleases]);
+  }, [intervalHours, checkReleases, refresh]);
 
-  return { api, snapshot, setSnapshot, catalog, operation, setOperation, loading, checking, error, setError, refresh, checkReleases };
+  return { api, snapshot, setSnapshot, catalog, operation, setOperation: acceptOperation, loading, checking, error, setError, refresh, checkReleases };
 }

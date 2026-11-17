@@ -72,14 +72,27 @@ pub fn scan() -> Result<Discovery, String> {
     let mut installations = Vec::new();
     let native = home.join(".local/bin/claude.exe");
     if native.is_file() {
+        let owned = native_install_owned(&home, &native);
         let path = native.to_string_lossy().to_string();
         installations.push(installation(
-            Source::Native,
+            if owned {
+                Source::Native
+            } else {
+                Source::External
+            },
             &native,
-            process::version(&native),
-            "user",
+            if owned {
+                process::version(&native)
+            } else {
+                None
+            },
+            if owned { "user" } else { "unknown" },
             active,
-            "官方原生安装目录",
+            if owned {
+                "官方原生安装目录"
+            } else {
+                "原生目录经重解析指向其他位置，无法确认归属，仅显示"
+            },
             None,
             None,
         ));
@@ -149,7 +162,12 @@ pub fn scan() -> Result<Discovery, String> {
             let Some(executable) = executable else {
                 continue;
             };
-            let scope = if prefix.starts_with(&home) {
+            let scope = if prefix
+                .canonicalize()
+                .ok()
+                .zip(home.canonicalize().ok())
+                .is_some_and(|(prefix, home)| prefix.starts_with(home))
+            {
                 "user"
             } else {
                 "machine"
@@ -306,6 +324,40 @@ fn installation(
     let path_text = path.to_string_lossy().to_string();
     let manageable = source != Source::External && scope == "user";
     let native = source == Source::Native;
+    let is_active = active.is_some_and(|p| {
+        process::equivalent(p, &path_text)
+            || (source == Source::Npm
+                && Path::new(p)
+                    .parent()
+                    .zip(path.parent())
+                    .is_some_and(|(a, b)| {
+                        process::equivalent(&a.to_string_lossy(), &b.to_string_lossy())
+                    }))
+    });
+    // Bind npm operations to both the package launcher and the package manager
+    // selected during preview. Replacing npm or redirecting its prefix invalidates
+    // an already confirmed plan even if claude.cmd itself remains unchanged.
+    let fingerprint = hex::encode(Sha256::digest(
+        format!(
+            "{}|{}|{}",
+            process::fingerprint(path),
+            npm_path
+                .as_deref()
+                .map(|p| process::fingerprint(Path::new(p)))
+                .unwrap_or_default(),
+            prefix
+                .as_deref()
+                .map(|p| {
+                    Path::new(p)
+                        .canonicalize()
+                        .unwrap_or_else(|_| PathBuf::from(p))
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .unwrap_or_default(),
+        )
+        .as_bytes(),
+    ));
     let id = hex::encode(Sha256::digest(
         format!("{source:?}|{}", path_text.to_lowercase()).as_bytes(),
     ))[..20]
@@ -328,7 +380,7 @@ fn installation(
         path: path_text.clone(),
         version,
         scope: scope.into(),
-        active: active.is_some_and(|p| process::equivalent(p, &path_text)),
+        active: is_active,
         capabilities: Capabilities {
             upgrade: manageable,
             install_version: manageable && native,
@@ -338,7 +390,7 @@ fn installation(
         manual_command,
         npm_path,
         prefix,
-        fingerprint: process::fingerprint(path),
+        fingerprint,
     }
 }
 
@@ -431,27 +483,140 @@ fn parse_json_strings(text: &str) -> Vec<String> {
 }
 
 pub fn running_for(installation: Option<&Installation>) -> Result<Vec<u32>, String> {
-    let mut command = process::ps("@(Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Select-Object ProcessId,ExecutablePath) | ConvertTo-Json -Compress");
+    let mut command = process::ps("ConvertTo-Json -InputObject @(Get-CimInstance Win32_Process -Filter \"Name='claude.exe' OR Name='node.exe'\" | Select-Object ProcessId,Name,ExecutablePath,CommandLine) -Compress");
     command.env("CCM_READ_ONLY", "1");
     let output = process::capture(command, Duration::from_secs(15))?;
     if output.code != 0 {
         return Err("无法核实运行中的 Claude 进程，请稍后重试".into());
     }
-    let value: Value = serde_json::from_str(&output.stdout).unwrap_or(Value::Array(Vec::new()));
+    running_from_json(&output.stdout, installation)
+}
+
+fn running_from_json(text: &str, installation: Option<&Installation>) -> Result<Vec<u32>, String> {
+    let value: Value =
+        serde_json::from_str(text).map_err(|_| "运行进程检测结果无效，不能安全开始操作")?;
     let values = match value {
         Value::Array(a) => a,
-        Value::Object(_) => vec![value],
-        _ => Vec::new(),
+        _ => return Err("运行进程检测结果格式无效，不能安全开始操作".into()),
     };
-    Ok(values
-        .iter()
-        .filter(|v| {
+    let mut running = Vec::new();
+    for value in values {
+        let pid = value["ProcessId"]
+            .as_u64()
+            .filter(|n| *n > 0 && *n <= u32::MAX as u64)
+            .ok_or("运行进程缺少有效标识，不能安全开始操作")? as u32;
+        let name = value["Name"].as_str().ok_or("无法确定运行进程归属")?;
+        let matches = if name.eq_ignore_ascii_case("node.exe") {
+            let command = value["CommandLine"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or("没有权限读取 Node 进程命令行，无法确认 Claude 会话是否结束")?;
+            let command = lexical_path(command);
+            let is_claude = command.contains("@anthropic-ai\\claude-code\\")
+                || command.contains("@anthropic-ai\\claude-code\"")
+                || command.contains("@anthropic-ai\\claude-code'");
+            // A Claude npm session whose exact prefix is unavailable still blocks
+            // npm operations rather than risking removal of a running package.
+            is_claude && installation.is_none_or(|i| i.source == Source::Npm)
+        } else if name.eq_ignore_ascii_case("claude.exe") {
+            let executable = value["ExecutablePath"].as_str().filter(|s| !s.is_empty());
             installation.is_none_or(|i| {
-                v["ExecutablePath"]
-                    .as_str()
-                    .is_none_or(|p| process::equivalent(p, &i.path) || i.source == Source::Npm)
+                executable.is_none_or(|path| {
+                    process::equivalent(path, &i.path)
+                        || i.source == Source::Npm
+                        || (i.source == Source::Native
+                            && platform::user_home().is_ok_and(|home| {
+                                let versions = home.join(".local/share/claude");
+                                Path::new(path)
+                                    .canonicalize()
+                                    .ok()
+                                    .zip(versions.canonicalize().ok())
+                                    .is_some_and(|(executable, versions)| {
+                                        executable.starts_with(versions)
+                                    })
+                            }))
+                })
             })
-        })
-        .filter_map(|v| v["ProcessId"].as_u64().map(|n| n as u32))
-        .collect())
+        } else {
+            return Err("运行进程检测返回了未知程序，不能安全开始操作".into());
+        };
+        if matches {
+            running.push(pid);
+        }
+    }
+    Ok(running)
+}
+
+fn lexical_path(path: &str) -> String {
+    path.trim_start_matches(r"\\?\")
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase()
+}
+
+fn native_install_owned(home: &Path, launcher: &Path) -> bool {
+    let Ok(home) = home.canonicalize() else {
+        return false;
+    };
+    let expected_parent = home.join(".local/bin");
+    let expected_versions = home.join(".local/share/claude");
+    let Some(parent) = launcher.parent().and_then(|p| p.canonicalize().ok()) else {
+        return false;
+    };
+    if lexical_path(&parent.to_string_lossy()) != lexical_path(&expected_parent.to_string_lossy()) {
+        return false;
+    }
+    if expected_versions.exists() {
+        let Ok(actual) = expected_versions.canonicalize() else {
+            return false;
+        };
+        if lexical_path(&actual.to_string_lossy())
+            != lexical_path(&expected_versions.to_string_lossy())
+        {
+            return false;
+        }
+    }
+    let Ok(executable) = launcher.canonicalize() else {
+        return false;
+    };
+    let actual = lexical_path(&executable.to_string_lossy());
+    let launcher = lexical_path(&expected_parent.join("claude.exe").to_string_lossy());
+    let versions = lexical_path(&expected_versions.to_string_lossy());
+    actual == launcher || actual.starts_with(&(versions + "\\"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_probe_fails_closed_for_malformed_or_inaccessible_results() {
+        assert!(running_from_json("", None).is_err());
+        assert!(running_from_json("null", None).is_err());
+        assert!(running_from_json(
+            r#"[{"ProcessId":42,"Name":"node.exe","CommandLine":null}]"#,
+            None
+        )
+        .is_err());
+        assert!(running_from_json("[]", None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn process_probe_includes_npm_node_sessions_and_unknown_native_paths() {
+        let json = r#"[{"ProcessId":42,"Name":"node.exe","CommandLine":"node C:/Users/Alice/AppData/Roaming/npm/node_modules/@anthropic-ai/claude-code/cli.js"},{"ProcessId":43,"Name":"node.exe","CommandLine":"node C:/work/server.js"},{"ProcessId":44,"Name":"claude.exe","ExecutablePath":null}]"#;
+        assert_eq!(running_from_json(json, None).unwrap(), vec![42, 44]);
+    }
+
+    #[test]
+    fn native_location_must_stay_in_exact_managed_tree() {
+        let temporary = tempfile::tempdir().unwrap();
+        let launcher = temporary.path().join(".local/bin/claude.exe");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, b"fixture").unwrap();
+        assert!(native_install_owned(temporary.path(), &launcher));
+        let outsider = temporary.path().join("outside/claude.exe");
+        std::fs::create_dir_all(outsider.parent().unwrap()).unwrap();
+        std::fs::write(&outsider, b"fixture").unwrap();
+        assert!(!native_install_owned(temporary.path(), &outsider));
+    }
 }

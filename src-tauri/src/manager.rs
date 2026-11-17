@@ -1,10 +1,8 @@
 use crate::domain::*;
 use crate::{discovery, path_edit, platform, policy, process, proxy, releases, storage};
-use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -155,6 +153,7 @@ impl Manager {
 
     pub fn snapshot(&self) -> Result<Snapshot, String> {
         let discovery = self.discovery(false)?;
+        self.recover_interrupted(&discovery)?;
         let settings = self.settings()?;
         let policy = policy::read_policy(&self.data_dir)?;
         let history = self
@@ -164,6 +163,22 @@ impl Manager {
             .operations
             .clone();
         let mut checks = discovery.checks;
+        if policy.mode == "hold" {
+            if let Some(record) = policy::list_changes(&self.data_dir)?
+                .into_iter()
+                .find(|r| r.state == "applied" && r.mode == "hold")
+            {
+                let drift = hold_drift(&record.held_versions, &discovery.installations);
+                if !drift.is_empty() {
+                    checks.push(Check {
+                        id: "hold-version-drift".into(),
+                        title: "保持版本已发生变化".into(),
+                        level: "warning".into(),
+                        message: drift.join("；"),
+                    });
+                }
+            }
+        }
         if let Some(message) = self
             .startup_warning
             .lock()
@@ -279,6 +294,9 @@ impl Manager {
                         .await?
                     }
                 };
+                if let Some(install) = installation.as_ref().filter(|i| !i.capabilities.upgrade) {
+                    preview.manual_command = Some(manual_command(install, false, Some(&target)));
+                }
                 if let Some(minimum) = policy
                     .minimum_version
                     .as_deref()
@@ -319,6 +337,24 @@ impl Manager {
                 }
                 .into();
                 preview.target_version = Some(target);
+                if let (Some(current), Some(target)) = (
+                    preview.current_version.as_deref(),
+                    preview.target_version.as_deref(),
+                ) {
+                    if semver::Version::parse(target).ok() < semver::Version::parse(current).ok() {
+                        preview.warnings.push(format!(
+                            "目标 {target} 低于当前 {current}，此次操作将重装旧版本。"
+                        ));
+                    }
+                }
+                preview.changes.push(PlanChange {
+                    name: "Claude Code 版本".into(),
+                    before: preview
+                        .current_version
+                        .clone()
+                        .unwrap_or_else(|| "未安装".into()),
+                    after: preview.target_version.clone().unwrap_or_default(),
+                });
                 preview.steps.extend([
                     "等待使用此实例的会话结束".into(),
                     "通过对应安装来源执行安装".into(),
@@ -336,7 +372,8 @@ impl Manager {
                 let install = installation.ok_or("请选择要卸载的实例")?;
                 preview.title = "卸载选中的安装实例".into();
                 preview.can_execute = install.capabilities.uninstall;
-                preview.manual_command = install.manual_command.clone();
+                preview.manual_command =
+                    (!preview.can_execute).then(|| manual_command(&install, true, None));
                 preview.steps.extend([
                     format!("移除该来源的安装文件 {}", install.path),
                     "重新核查其他安装和终端命中关系".into(),
@@ -400,12 +437,22 @@ impl Manager {
                         _ => "native",
                     })
                     .unwrap_or("native");
-                let change = policy::preview_policy(&policy::PolicyRequest {
+                let mut change = policy::preview_policy(&policy::PolicyRequest {
                     mode: request.policy_mode.ok_or("请选择更新策略")?,
                     channel: request.channel,
                     minimum_version: request.minimum_version,
                     source: source.into(),
                 })?;
+                if change.mode == "hold" {
+                    change.held_versions = discovery
+                        .installations
+                        .iter()
+                        .filter_map(|i| i.version.as_ref().map(|v| (i.id.clone(), v.clone())))
+                        .collect();
+                    if change.held_versions.is_empty() {
+                        return Err("尚无可识别的已安装版本，无法记录保持版本基线".into());
+                    }
+                }
                 preview.changes = change
                     .fields
                     .iter()
@@ -435,11 +482,15 @@ impl Manager {
             "restore-change" => {
                 let id = request.change_id.ok_or("缺少变更记录 ID")?;
                 preview.title = "还原管理器所做的更改".into();
-                if let Ok(change) = path_edit::preview_restore(&self.data_dir, &id) {
+                if path_edit::list_changes(&self.data_dir)?
+                    .iter()
+                    .any(|change| change.id == id)
+                {
+                    let change = path_edit::preview_restore(&self.data_dir, &id)?;
                     preview.changes.push(PlanChange {
                         name: "用户 PATH".into(),
-                        before: change.before.value,
-                        after: change.after.value,
+                        before: change.after.value,
+                        after: change.before.value,
                     });
                     Action::RestorePath(id)
                 } else {
@@ -502,10 +553,81 @@ impl Manager {
             .write(true)
             .open(self.data_dir.join("operation.lock"))
             .map_err(|e| e.to_string())?;
-        file.try_lock_exclusive()
+        file.try_lock()
             .map_err(|_| "另一个管理器操作正在执行，请等待完成")?;
         self.ensure_writable()?;
+        let interrupted = self
+            .history
+            .lock()
+            .map_err(|_| "任务状态锁异常")?
+            .operations
+            .iter()
+            .filter(|o| o.phase == "recovering")
+            .filter_map(|o| o.child_pid)
+            .collect::<Vec<_>>();
+        for pid in interrupted {
+            if process::pid_running(pid)? {
+                return Err(format!(
+                    "上次任务的子进程 {pid} 仍在运行，请等其结束后重新检测"
+                ));
+            }
+        }
         Ok(file)
+    }
+
+    fn recover_interrupted(&self, discovery: &discovery::Discovery) -> Result<(), String> {
+        let interrupted = self
+            .history
+            .lock()
+            .map_err(|_| "任务状态锁异常")?
+            .operations
+            .iter()
+            .filter(|o| o.phase == "recovering")
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for operation in interrupted {
+            if let Some(pid) = operation.child_pid {
+                if process::pid_running(pid)? {
+                    continue;
+                }
+            }
+            let actual = discovery.installations.iter().find(|i| {
+                operation
+                    .installation_id
+                    .as_ref()
+                    .map_or(i.source == Source::Native, |id| &i.id == id)
+            });
+            let detail = if operation.kind == "uninstall" && actual.is_none() {
+                "重新检测未发现原实例，上次卸载的退出状态未知。".to_string()
+            } else if let Some(actual) = actual {
+                format!(
+                    "重新检测发现 {}，实际版本 {}；原任务退出状态未知，请按当前状态操作。",
+                    actual.path,
+                    actual.version.as_deref().unwrap_or("不可用")
+                )
+            } else {
+                "重新检测未发现目标安装，请检查任务日志并重新生成安装计划。".to_string()
+            };
+            if let Some(record) = self
+                .history
+                .lock()
+                .map_err(|_| "任务状态锁异常")?
+                .operations
+                .iter_mut()
+                .find(|o| o.id == operation.id)
+            {
+                record.phase = "recovered".into();
+                record.finished_at = Some(chrono::Utc::now().to_rfc3339());
+                record.child_pid = None;
+                record.result = Some(detail);
+                changed = true;
+            }
+        }
+        if changed && !self.read_only.load(Ordering::Relaxed) {
+            self.persist_history()?;
+        }
+        Ok(())
     }
 
     pub fn operation(&self, id: &str) -> Result<Operation, String> {
@@ -656,6 +778,7 @@ impl Manager {
         if cancelled.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
+        self.ensure_writable()?;
         match action {
             Action::Install {
                 installation,
@@ -668,6 +791,7 @@ impl Manager {
                 self.wait_for_sessions(app, id, Some(&installation), cancelled)
                     .await?;
                 self.recheck_installation(Some(&installation))?;
+                self.ensure_writable()?;
                 if cancelled.load(Ordering::Relaxed) {
                     return Err("cancelled".into());
                 }
@@ -679,8 +803,8 @@ impl Manager {
                 let app = app.clone();
                 let id = id.to_string();
                 tokio::task::spawn_blocking(move || {
-                    match installation.source {
-                        Source::Native => uninstall_native(&installation)?,
+                    let exit_code = match installation.source {
+                        Source::Native => { uninstall_native(&installation)?; 0 },
                         Source::Npm => {
                             let npm = installation.npm_path.as_ref().ok_or("npm 路径缺失")?;
                             let prefix = installation.prefix.as_ref().ok_or("npm prefix 缺失")?;
@@ -694,10 +818,7 @@ impl Manager {
                                     prefix.clone(),
                                 ],
                             );
-                            let code = manager.run_installer(&app, &id, command)?;
-                            if code != 0 {
-                                return Err(format!("npm 卸载返回 {code}，请重新检查实例状态"));
-                            }
+                            manager.run_installer(&app, &id, command)?
                         }
                         Source::Winget => {
                             let winget = process::resolve("winget.exe").ok_or("WinGet 不可用")?;
@@ -712,22 +833,19 @@ impl Manager {
                                 "--silent",
                                 "--disable-interactivity",
                             ]);
-                            let code = manager.run_installer(&app, &id, command)?;
-                            if code != 0 {
-                                return Err(format!("WinGet 卸载返回 {code}，请重新检查实例状态"));
-                            }
+                            manager.run_installer(&app, &id, command)?
                         }
                         Source::External => return Err("此实例由其他应用管理".into()),
-                    }
+                    };
                     let discovery = manager.discovery(true)?;
                     if discovery
                         .installations
                         .iter()
                         .any(|i| i.id == installation.id)
                     {
-                        return Err("卸载后仍发现原实例，请查看诊断".into());
+                        return Err(format!("卸载程序退出码 {exit_code}，复核后仍发现原实例，请查看诊断"));
                     }
-                    Ok("选定安装已移除，用户配置与其他实例已保留。终端命中关系已重新检测。".into())
+                    Ok(format!("选定安装已移除，用户配置与其他实例已保留。终端命中关系已重新检测。卸载程序退出码 {exit_code}。"))
                 })
                 .await
                 .map_err(|e| e.to_string())?
@@ -738,7 +856,20 @@ impl Manager {
                     o.cancellable = false;
                 });
                 path_edit::apply_change(&self.data_dir, &change)?;
-                Ok("用户级 PATH 已更新并保存可撤销记录。请重新打开已有终端。".into())
+                let after = self.discovery(true)?;
+                let resolved = after
+                    .shells
+                    .iter()
+                    .map(|shell| {
+                        format!(
+                            "{}: {}",
+                            shell.name,
+                            shell.path.as_deref().unwrap_or("未命中")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("；");
+                Ok(format!("用户级 PATH 已更新并保存可撤销记录。新进程核查：{resolved}。请重新打开已有终端。"))
             }
             Action::Policy(change) => {
                 self.update_operation(app, id, |o| {
@@ -747,6 +878,15 @@ impl Manager {
                 });
                 policy::apply_policy(&self.data_dir, &change)?;
                 let policy = policy::read_policy(&self.data_dir)?;
+                if let Some(installation) = self
+                    .discovery(true)?
+                    .installations
+                    .iter()
+                    .find(|i| i.active && i.source != Source::External)
+                {
+                    let report = self.doctor_report(installation).unwrap_or_else(|e| e);
+                    self.update_operation(app, id, |o| o.messages.push(report));
+                }
                 Ok(format!("更新策略已保存。当前推断模式为 {}，请在目标项目终端运行 claude doctor 核实组织与项目覆盖。", policy.mode))
             }
             Action::RestorePath(change_id) => {
@@ -850,12 +990,10 @@ impl Manager {
             .unwrap_or(Source::Native);
         let command = match source {
             Source::Native => {
-                let executable = if let Some(installation) = &installation {
-                    PathBuf::from(&installation.path)
-                } else {
+                let executable = {
                     self.update_operation(app, id, |o| {
                         o.phase = "downloading".into();
-                        o.cancellable = false;
+                        o.cancellable = true;
                         o.result = None;
                     });
                     let client = proxy::reqwest_client(&self.data_dir)?;
@@ -869,6 +1007,7 @@ impl Manager {
                         &bootstrap,
                         &platform::native_architecture(),
                         &self.data_dir.join("cache"),
+                        cancelled,
                         |downloaded, total| {
                             if last_event.elapsed() >= Duration::from_millis(500)
                                 || downloaded == total
@@ -889,7 +1028,20 @@ impl Manager {
                     return Err("cancelled".into());
                 }
                 self.recheck_installation(installation.as_ref())?;
-                process::executable_command(&executable, &["install".into(), version.clone()])
+                let mut args = vec!["install".into(), version.clone()];
+                if self.operation(id)?.kind == "reinstall" {
+                    let help = process::capture(
+                        process::executable_command(
+                            &executable,
+                            &["install".into(), "--help".into()],
+                        ),
+                        Duration::from_secs(15),
+                    )?;
+                    if help.stdout.split_whitespace().any(|word| word == "--force") {
+                        args.push("--force".into());
+                    }
+                }
+                process::executable_command(&executable, &args)
             }
             Source::Npm => {
                 let install = installation.as_ref().ok_or("npm 实例缺失")?;
@@ -955,6 +1107,8 @@ impl Manager {
         });
         let manager = self.clone();
         let expected_path = installation.as_ref().map(|i| i.path.clone());
+        let verify_app = app.clone();
+        let verify_id = id.to_string();
         tokio::task::spawn_blocking(move || {
             let after = manager.discovery(true)?;
             let actual = after.installations.iter().find(|i| {
@@ -973,6 +1127,8 @@ impl Manager {
                 releases::verify_authenticode(Path::new(&actual.path))?;
             }
             let mut message = format!("已安装并验证 Claude Code {version}。");
+            let report = manager.doctor_report(actual).unwrap_or_else(|error| error);
+            manager.update_operation(&verify_app, &verify_id, |o| o.messages.push(report));
             if !actual.active { message.push_str(" 当前 PowerShell 命中其他路径，请在环境页处理 PATH。"); }
             if exit_code != 0 { message.push_str(&format!(" 安装器返回 {exit_code}，目标版本已通过独立验证。")); }
             Ok(message)
@@ -997,36 +1153,34 @@ impl Manager {
         self.update_operation(app, id, |o| {
             o.child_pid = Some(child.id());
         });
-        let (send, receive) = std::sync::mpsc::channel::<String>();
+        let (send, receive) = std::sync::mpsc::sync_channel::<String>(200);
         if let Some(stdout) = child.stdout.take() {
             let send = send.clone();
             std::thread::spawn(move || {
-                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    let _ = send.send(line.chars().take(4096).collect());
-                }
+                process::stream_lines(stdout, send);
             });
         }
         if let Some(stderr) = child.stderr.take() {
             let send = send.clone();
             std::thread::spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    let _ = send.send(line.chars().take(4096).collect());
-                }
+                process::stream_lines(stderr, send);
             });
         }
         drop(send);
         let started = Instant::now();
         let mut warned = false;
         loop {
-            for line in receive.try_iter().take(100) {
-                let line = storage::redact(&line);
-                if line.trim().is_empty() {
-                    continue;
-                }
+            let lines = receive
+                .try_iter()
+                .take(100)
+                .map(|line| storage::redact(&line))
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>();
+            if !lines.is_empty() {
                 self.update_operation(app, id, |o| {
-                    o.messages.push(line);
+                    o.messages.extend(lines);
                     if o.messages.len() > 200 {
-                        o.messages.remove(0);
+                        o.messages.drain(..o.messages.len() - 200);
                     }
                 });
             }
@@ -1086,8 +1240,31 @@ impl Manager {
 
     pub fn diagnostics(&self) -> Result<String, String> {
         let snapshot = self.snapshot()?;
-        let text = serde_json::to_string_pretty(&snapshot).map_err(|e| e.to_string())?;
+        let mut text = serde_json::to_string_pretty(&snapshot).map_err(|e| e.to_string())?;
+        for installation in snapshot
+            .installations
+            .iter()
+            .filter(|i| i.active && i.source != Source::External)
+        {
+            text.push_str("\n\nClaude doctor (current manager environment):\n");
+            text.push_str(
+                &self
+                    .doctor_report(installation)
+                    .unwrap_or_else(|error| error),
+            );
+        }
         Ok(storage::redact(&text))
+    }
+
+    fn doctor_report(&self, installation: &Installation) -> Result<String, String> {
+        let mut command =
+            process::executable_command(Path::new(&installation.path), &["doctor".into()]);
+        platform::apply_fresh_user_path(&mut command)?;
+        proxy::apply_command_proxy(&self.data_dir, &mut command)?;
+        command.env("DISABLE_AUTOUPDATER", "1");
+        let output = process::capture(command, Duration::from_secs(30))?;
+        let text = format!("exit={}\n{}\n{}", output.code, output.stdout, output.stderr);
+        Ok(storage::redact(&text).chars().take(12_000).collect())
     }
 
     fn check_current_policy(&self, version: &str) -> Result<(), String> {
@@ -1277,6 +1454,58 @@ fn timestamp(milliseconds: u64) -> String {
         .unwrap_or_default()
 }
 
+fn manual_command(installation: &Installation, uninstall: bool, target: Option<&str>) -> String {
+    let quote = |text: &str| format!("'{}'", text.replace('\'', "''"));
+    match installation.source {
+        Source::Npm => {
+            let npm = quote(installation.npm_path.as_deref().unwrap_or("npm.cmd"));
+            let prefix = quote(installation.prefix.as_deref().unwrap_or_default());
+            if uninstall {
+                format!("& {npm} uninstall -g @anthropic-ai/claude-code --prefix {prefix}")
+            } else {
+                format!(
+                    "& {npm} install -g @anthropic-ai/claude-code@{} --prefix {prefix}",
+                    target.unwrap_or("latest")
+                )
+            }
+        }
+        Source::Winget => {
+            let scope = if installation.scope == "machine" {
+                "machine"
+            } else {
+                "user"
+            };
+            if uninstall {
+                format!("winget uninstall --id Anthropic.ClaudeCode --exact --scope {scope}")
+            } else {
+                format!("winget upgrade --id Anthropic.ClaudeCode --exact --source winget --scope {scope} --version {}", target.unwrap_or("latest"))
+            }
+        }
+        _ => "请通过原安装来源管理此实例".into(),
+    }
+}
+
+fn hold_drift(
+    held: &std::collections::BTreeMap<String, String>,
+    installations: &[Installation],
+) -> Vec<String> {
+    held.iter()
+        .filter_map(|(id, expected)| {
+            let actual = installations.iter().find(|i| &i.id == id);
+            if actual.and_then(|i| i.version.as_ref()) == Some(expected) {
+                return None;
+            }
+            Some(format!(
+                "原保持版本 {expected}，当前 {}（{}）",
+                actual
+                    .and_then(|i| i.version.as_deref())
+                    .unwrap_or("实例缺失或版本不可用"),
+                actual.map(|i| i.path.as_str()).unwrap_or(id)
+            ))
+        })
+        .collect()
+}
+
 fn uninstall_native(installation: &Installation) -> Result<(), String> {
     let home = platform::user_home()?
         .canonicalize()
@@ -1338,4 +1567,78 @@ fn verify_winget_version(version: &str) -> Result<(), String> {
         return Err("WinGet 来源尚未提供目标版本，请稍后检查".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_installation() -> Installation {
+        Installation {
+            id: "fixture".into(),
+            source: Source::Npm,
+            path: "C:/isolated/claude.cmd".into(),
+            version: Some("2.1.100".into()),
+            scope: "machine".into(),
+            active: true,
+            capabilities: Capabilities {
+                upgrade: false,
+                install_version: false,
+                uninstall: false,
+            },
+            detail: String::new(),
+            manual_command: None,
+            npm_path: Some("C:/Node/npm.cmd".into()),
+            prefix: Some("C:/Owner's tools".into()),
+            fingerprint: "fixture".into(),
+        }
+    }
+
+    #[test]
+    fn operation_lock_excludes_another_manager_and_releases_on_drop() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = Manager::new(directory.path().to_path_buf()).unwrap();
+        let second = Manager::new(directory.path().to_path_buf()).unwrap();
+        let guard = first.operation_lock().unwrap();
+        assert!(second.operation_lock().is_err());
+        drop(guard);
+        assert!(second.operation_lock().is_ok());
+    }
+
+    #[test]
+    fn future_proxy_schema_turns_all_writes_read_only_without_overwriting() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = Manager::new(directory.path().to_path_buf()).unwrap();
+        let path = directory.path().join("proxy.json");
+        let bytes = br#"{"schemaVersion":999,"data":{"secret":"preserve"}}"#;
+        std::fs::write(&path, bytes).unwrap();
+        assert!(manager.operation_lock().is_err());
+        assert!(manager.read_only.load(Ordering::Relaxed));
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn manual_actions_bind_source_scope_version_and_quote_prefix() {
+        let installation = fixture_installation();
+        let upgrade = manual_command(&installation, false, Some("2.1.200"));
+        assert!(upgrade.contains("@2.1.200"));
+        assert!(upgrade.contains("'C:/Owner''s tools'"));
+        let uninstall = manual_command(&installation, true, None);
+        assert!(uninstall.contains(" uninstall "));
+        assert!(!uninstall.contains("@latest"));
+    }
+
+    #[test]
+    fn hold_drift_reports_changed_missing_and_unknown_versions() {
+        let mut installation = fixture_installation();
+        let baseline = [(installation.id.clone(), "2.1.100".into())]
+            .into_iter()
+            .collect();
+        assert!(hold_drift(&baseline, &[installation.clone()]).is_empty());
+        installation.version = Some("2.1.200".into());
+        assert!(hold_drift(&baseline, &[installation.clone()])[0].contains("2.1.200"));
+        installation.version = None;
+        assert_eq!(hold_drift(&baseline, &[installation]).len(), 1);
+        assert_eq!(hold_drift(&baseline, &[]).len(), 1);
+    }
 }

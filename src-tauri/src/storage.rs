@@ -56,7 +56,9 @@ pub fn file_fingerprint(path: &Path) -> Result<String, String> {
 
 /// A newer schema is readable only when its data still matches the known shape.
 /// Callers must carry `read_only` into all write operations.
-pub fn read_json<T: DeserializeOwned + Default>(path: &Path) -> Result<LoadResult<T>, String> {
+pub fn read_json<T: DeserializeOwned + Serialize + Default>(
+    path: &Path,
+) -> Result<LoadResult<T>, String> {
     let Some(bytes) = read_bytes(path)? else {
         return Ok(LoadResult {
             value: T::default(),
@@ -186,7 +188,13 @@ pub fn redact(text: &str) -> String {
             if home.len() > 3 {
                 redacted = redacted.replace(&home, "<用户目录>");
                 redacted = redacted.replace(&home.replace('\\', "/"), "<用户目录>");
+                redacted = redacted.replace(&home.replace('\\', "\\\\"), "<用户目录>");
             }
+        }
+    }
+    if let Ok(username) = std::env::var("USERNAME") {
+        if username.len() > 2 {
+            redacted = redacted.replace(&username, "<用户名>");
         }
     }
     redacted
@@ -194,16 +202,16 @@ pub fn redact(text: &str) -> String {
         .map(|line| {
             let lower = line.to_ascii_lowercase();
             if [
-                "authorization:",
+                "authorization",
                 "api_key",
                 "api-key",
                 "access_token",
                 "auth_token",
                 "oauth",
-                "password=",
-                "password:",
+                "password",
                 "secret=",
                 "secret:",
+                "\"secret\"",
                 "proxy-authorization",
             ]
             .iter()
@@ -303,5 +311,10 @@ mod tests {
         assert!(!clean.contains("secret"));
         assert!(!clean.contains("123456"));
         assert!(!clean.contains("sk-second"));
+        assert!(!redact(r#"{"password": "unsafe-value"}"#).contains("unsafe-value"));
+        if let Ok(home) = std::env::var("USERPROFILE") {
+            let serialized = serde_json::to_string(&format!("{home}\\private.json")).unwrap();
+            assert!(redact(&serialized).contains("<用户目录>"));
+        }
     }
 }

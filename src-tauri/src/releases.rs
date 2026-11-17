@@ -2,6 +2,8 @@ use crate::domain::{Release, ReleaseCatalog};
 use crate::process;
 use futures_util::StreamExt;
 use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
+use pgp::crypto::{hash::HashAlgorithm, public_key::PublicKeyAlgorithm};
+use pgp::packet::SignatureType;
 use pgp::types::KeyDetails;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -84,6 +86,9 @@ pub fn verify_signature(manifest: &[u8], signature: &[u8]) -> Result<(), String>
     if format!("{:X}", key.fingerprint()) != KEY_FINGERPRINT {
         return Err("发布密钥指纹不匹配".into());
     }
+    if key.algorithm() != PublicKeyAlgorithm::RSA || !key.public_subkeys.is_empty() {
+        return Err("发布密钥算法或结构超出固定信任范围".into());
+    }
     key.verify_bindings()
         .map_err(|e| format!("发布密钥绑定验证失败: {e}"))?;
     let signature = if signature.starts_with(b"-----BEGIN") {
@@ -93,13 +98,20 @@ pub fn verify_signature(manifest: &[u8], signature: &[u8]) -> Result<(), String>
         DetachedSignature::from_bytes(BufReader::new(signature))
     }
     .map_err(|e| format!("发布签名解析失败: {e}"))?;
+    if !signature
+        .signature
+        .config()
+        .is_some_and(|c| c.pub_alg == PublicKeyAlgorithm::RSA)
+        || signature.signature.typ() != Some(SignatureType::Binary)
+        || !matches!(
+            signature.signature.hash_alg(),
+            Some(HashAlgorithm::Sha256 | HashAlgorithm::Sha384 | HashAlgorithm::Sha512)
+        )
+    {
+        return Err("发布签名算法不符合固定 RSA/SHA2 策略".into());
+    }
     if signature.verify(&key, manifest).is_ok() {
         return Ok(());
-    }
-    for subkey in &key.public_subkeys {
-        if signature.verify(subkey, manifest).is_ok() {
-            return Ok(());
-        }
     }
     Err("官方 manifest 签名验证失败".into())
 }
@@ -268,6 +280,7 @@ pub async fn download_binary<F>(
     checked: &VerifiedManifest,
     architecture: &str,
     folder: &Path,
+    cancelled: &std::sync::atomic::AtomicBool,
     mut progress: F,
 ) -> Result<PathBuf, String>
 where
@@ -285,7 +298,7 @@ where
         verify_authenticode(&destination)?;
         return Ok(destination);
     }
-    let temporary = destination.with_extension("part");
+    let temporary = destination.with_extension("part.exe");
     let url = format!(
         "{RELEASE_ROOT}/{version}/{platform}/claude.exe",
         version = checked.manifest.version
@@ -309,6 +322,9 @@ where
     let mut downloaded = 0;
     let mut digest = Sha256::new();
     while let Some(chunk) = stream.next().await {
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
         let chunk = chunk.map_err(network_error)?;
         downloaded += chunk.len() as u64;
         if downloaded > artifact.size {
@@ -399,6 +415,112 @@ mod tests {
             SignedPublicKey::from_string(include_str!("../resources/anthropic-release.asc"))
                 .unwrap();
         assert_eq!(format!("{:X}", key.fingerprint()), KEY_FINGERPRINT);
+        assert_eq!(key.algorithm(), PublicKeyAlgorithm::RSA);
+        assert!(key.public_subkeys.is_empty());
         assert!(verify_signature(b"{}", b"bad signature").is_err());
+    }
+
+    #[test]
+    fn official_signed_fixture_verifies_and_tampering_is_rejected() {
+        let manifest = include_bytes!("../../tests/fixtures/official-manifest.json");
+        let signature = include_bytes!("../../tests/fixtures/official-manifest.json.sig");
+        verify_signature(manifest, signature)
+            .expect("official manifest must validate against pinned key");
+        let mut changed = manifest.to_vec();
+        let offset = changed.iter().position(|byte| *byte == b'2').unwrap();
+        changed[offset] = b'3';
+        assert!(verify_signature(&changed, signature).is_err());
+        let mut changed_signature = signature.to_vec();
+        let offset = changed_signature
+            .iter()
+            .position(|byte| *byte == b'i')
+            .unwrap();
+        changed_signature[offset] = b'j';
+        assert!(verify_signature(manifest, &changed_signature).is_err());
+        let parsed: Manifest = serde_json::from_slice(manifest).unwrap();
+        assert_eq!(parsed.version, "2.1.326");
+        assert_eq!(windows_artifact(&parsed, "x86_64").unwrap().0, "win32-x64");
+    }
+
+    #[test]
+    fn binary_checksum_rejects_same_size_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("binary.fixture");
+        std::fs::write(&path, b"original").unwrap();
+        let artifact = PlatformArtifact {
+            binary: "claude.exe".into(),
+            checksum: hex::encode(Sha256::digest(b"original")),
+            size: 8,
+        };
+        verify_digest(&path, &artifact).unwrap();
+        std::fs::write(&path, b"modified").unwrap();
+        assert!(verify_digest(&path, &artifact).is_err());
+    }
+
+    /// Never run on a developer machine. The explicit opt-in and fresh-profile
+    /// checks are deliberate because this installs Claude in the runner's home.
+    #[tokio::test]
+    #[ignore = "installs Claude only on an explicitly opted-in disposable GitHub runner"]
+    async fn native_install_smoke() {
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        assert_eq!(std::env::var("CCM_RUN_INSTALL_SMOKE").as_deref(), Ok("1"));
+        let home = crate::platform::user_home().unwrap();
+        let launcher = home.join(".local/bin/claude.exe");
+        assert!(
+            !launcher.exists(),
+            "smoke requires a fresh disposable runner profile"
+        );
+        let temporary = tempfile::tempdir().unwrap();
+        let client = reqwest::Client::builder()
+            .user_agent("claude-code-manager-isolated-smoke/0.1")
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap();
+        let target = manifest(&client, "2.1.326").await.unwrap();
+        let bootstrap_version = channel(&client, "latest").await.unwrap();
+        let bootstrap = manifest(&client, &bootstrap_version).await.unwrap();
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let binary = download_binary(
+            &client,
+            &bootstrap,
+            &crate::platform::native_architecture(),
+            temporary.path(),
+            &cancelled,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        let help = process::capture(
+            process::executable_command(&binary, &["install".into(), "--help".into()]),
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+        let force_supported = help.stdout.split_whitespace().any(|word| word == "--force");
+        println!("bootstrap={bootstrap_version}; --force={force_supported}");
+        for reinstall in [false, true] {
+            let mut args = vec!["install".into(), target.manifest.version.clone()];
+            if reinstall && force_supported {
+                args.push("--force".into());
+            }
+            let mut command = process::executable_command(&binary, &args);
+            command.env("DISABLE_AUTOUPDATER", "1");
+            command.env(
+                "CLAUDE_CONFIG_DIR",
+                temporary.path().join("claude-settings"),
+            );
+            crate::platform::apply_fresh_user_path(&mut command).unwrap();
+            let output = process::capture(command, std::time::Duration::from_secs(600)).unwrap();
+            println!(
+                "reinstall={reinstall}; exit={}; {}",
+                output.code,
+                crate::storage::redact(&output.stdout)
+            );
+            assert_eq!(process::version(&launcher).as_deref(), Some("2.1.326"));
+            let (_, artifact) =
+                windows_artifact(&target.manifest, &crate::platform::native_architecture())
+                    .unwrap();
+            verify_digest(&launcher, artifact).unwrap();
+            verify_authenticode(&launcher).unwrap();
+        }
     }
 }

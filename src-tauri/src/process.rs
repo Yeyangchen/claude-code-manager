@@ -84,6 +84,31 @@ pub fn ps_capture(script: &str) -> Result<Output, String> {
     capture(ps(script), Duration::from_secs(20))
 }
 
+/// Keep draining installers even if output is enormous, unbroken, or the UI
+/// consumes slowly. Only a bounded tail reaches the task journal.
+pub fn stream_lines(mut reader: impl Read, send: std::sync::mpsc::SyncSender<String>) {
+    let mut buffer = [0u8; 4096];
+    let mut line = Vec::with_capacity(4096);
+    while let Ok(count) = reader.read(&mut buffer) {
+        if count == 0 {
+            break;
+        }
+        for byte in &buffer[..count] {
+            if *byte == b'\n' || *byte == b'\r' {
+                if !line.is_empty() {
+                    let _ = send.try_send(String::from_utf8_lossy(&line).into_owned());
+                    line.clear();
+                }
+            } else if line.len() < 4096 {
+                line.push(*byte);
+            }
+        }
+    }
+    if !line.is_empty() {
+        let _ = send.try_send(String::from_utf8_lossy(&line).into_owned());
+    }
+}
+
 pub fn executable_command(path: &Path, args: &[String]) -> Command {
     // npm's .cmd shim is invoked with PowerShell's call operator. Data is passed
     // as environment JSON, never concatenated into the shell program.
@@ -124,6 +149,17 @@ pub fn version(path: &Path) -> Option<String> {
     .and_then(|o| parse_version(&o.stdout))
 }
 
+pub fn pid_running(pid: u32) -> Result<bool, String> {
+    let mut command = ps("if (Get-Process -Id ([uint32]$env:CCM_PID) -ErrorAction SilentlyContinue) { 'running' } else { 'gone' }");
+    command.env("CCM_PID", pid.to_string());
+    let result = capture(command, Duration::from_secs(15))?;
+    match (result.code, result.stdout.trim()) {
+        (0, "running") => Ok(true),
+        (0, "gone") => Ok(false),
+        _ => Err("无法核查上次任务的子进程状态".into()),
+    }
+}
+
 pub fn parse_version(text: &str) -> Option<String> {
     text.split_whitespace().find_map(|part| {
         let part = part.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '-');
@@ -142,7 +178,21 @@ pub fn fingerprint(path: &Path) -> String {
         metadata.as_ref().map(|m| m.len()),
         metadata.and_then(|m| m.modified().ok())
     );
-    hex::encode(Sha256::digest(material.as_bytes()))
+    let mut hash = Sha256::new();
+    hash.update(material.as_bytes());
+    // Bind the bytes of small package-manager launchers and shims.
+    if let Ok(mut file) = std::fs::File::open(path) {
+        if file.metadata().is_ok_and(|m| m.len() <= 1024 * 1024) {
+            let mut buffer = [0u8; 8192];
+            while let Ok(count) = file.read(&mut buffer) {
+                if count == 0 {
+                    break;
+                }
+                hash.update(&buffer[..count]);
+            }
+        }
+    }
+    hex::encode(hash.finalize())
 }
 
 pub fn equivalent(left: &str, right: &str) -> bool {
@@ -174,5 +224,10 @@ mod tests {
     #[test]
     fn semver_is_not_a_command() {
         assert_eq!(parse_version("2.1.326;Remove-Item"), None);
+    }
+    #[test]
+    fn bounded_output_keeps_draining() {
+        let data = std::io::Cursor::new(vec![b'a'; 100_000]);
+        assert_eq!(drain(data, 100).len(), 100);
     }
 }

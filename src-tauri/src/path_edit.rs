@@ -278,6 +278,9 @@ pub fn restore_change(data_dir: &Path, id: &str) -> Result<PathChange, String> {
     if current == record.after {
         write_user_path(&record.before)?;
     }
+    if read_user_path()? != record.before {
+        return Err("PATH 还原后发生外部变化，原变更记录已保留".into());
+    }
     record.state = "restored".into();
     storage::write_json(
         &storage::safe_record_path(&records_dir(data_dir), id)?,

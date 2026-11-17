@@ -199,7 +199,7 @@ pub fn reqwest_client(data_dir: &Path) -> Result<reqwest::Client, String> {
     }
     builder
         .build()
-        .map_err(|_| "无法创建网络客户端，请检查代理和系统证书")
+        .map_err(|_| "无法创建网络客户端，请检查代理和系统证书".to_string())
 }
 
 fn has_proxy_environment() -> bool {

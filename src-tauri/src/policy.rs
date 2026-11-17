@@ -1,6 +1,7 @@
 use crate::{platform, storage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -57,6 +58,8 @@ pub struct PolicyChange {
     pub fields: Vec<FieldChange>,
     pub mode: String,
     pub state: String,
+    #[serde(default)]
+    pub held_versions: BTreeMap<String, String>,
 }
 
 fn read_settings(path: &Path) -> Result<Value, String> {
@@ -106,6 +109,136 @@ fn managed_paths() -> Vec<PathBuf> {
     paths
 }
 
+fn has_policy(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.iter().any(|(key, value)| {
+            !["wslInheritsWindowsSettings", "managedSourcesBehavior"].contains(&key.as_str())
+                && !value.is_null()
+        })
+    })
+}
+
+fn merge_readonly(target: &mut Value, source: &Value) {
+    if let (Some(target), Some(source)) = (target.as_object_mut(), source.as_object()) {
+        for (key, value) in source {
+            if value.is_object() && target.get(key).is_some_and(Value::is_object) {
+                merge_readonly(target.get_mut(key).expect("existing object"), value);
+            } else {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn registry_policy(machine: bool) -> Result<Option<Value>, String> {
+    use winreg::{
+        enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE},
+        RegKey,
+    };
+    let root = RegKey::predef(if machine {
+        HKEY_LOCAL_MACHINE
+    } else {
+        HKEY_CURRENT_USER
+    });
+    let key = match root.open_subkey("SOFTWARE\\Policies\\ClaudeCode") {
+        Ok(key) => key,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => {
+            return Err("无法读取 Claude Code 注册表组织策略，请运行 claude doctor 核实".into())
+        }
+    };
+    let text: String = match key.get_value("Settings") {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Claude Code 注册表组织策略 Settings 必须是可读字符串".into()),
+    };
+    if text.len() > 8 * 1024 * 1024 {
+        return Err("注册表组织策略过大".into());
+    }
+    let value: Value = serde_json::from_str(&text).map_err(|_| "注册表组织策略 JSON 无效")?;
+    if !value.is_object() || value.get("env").is_some_and(|env| !env.is_object()) {
+        return Err("注册表组织策略结构无效".into());
+    }
+    Ok(Some(value))
+}
+
+#[cfg(not(windows))]
+fn registry_policy(_machine: bool) -> Result<Option<Value>, String> {
+    Ok(None)
+}
+
+fn managed_sources() -> Result<Vec<(String, Value)>, String> {
+    let mut files = json!({});
+    let mut names = Vec::new();
+    for path in managed_paths() {
+        if path.is_file() {
+            let value = read_settings(&path)?;
+            merge_readonly(&mut files, &value);
+            names.push(path.display().to_string());
+        }
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        let dropins = parent.join("managed-settings.d");
+        if dropins.exists() {
+            let mut paths = fs::read_dir(&dropins)
+                .map_err(|_| "无法读取组织策略 drop-in 目录")?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| "无法枚举组织策略文件")?;
+            paths.retain(|path| {
+                path.file_name()
+                    .is_some_and(|name| !name.to_string_lossy().starts_with('.'))
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension == "json")
+            });
+            paths.sort();
+            for path in paths {
+                merge_readonly(&mut files, &read_settings(&path)?);
+                names.push(path.display().to_string());
+            }
+        }
+    }
+    let machine = registry_policy(true)?;
+    let user = registry_policy(false)?;
+    let machine_present = machine.as_ref().is_some_and(has_policy);
+    let files_present = has_policy(&files);
+    let merge_all = machine
+        .as_ref()
+        .and_then(|value| value.get("managedSourcesBehavior"))
+        .or_else(|| files.get("managedSourcesBehavior"))
+        .and_then(Value::as_str)
+        == Some("merge");
+    let mut result = Vec::new();
+    if files_present {
+        // env is merged per variable across administrator sources, even with the
+        // default first-wins policy. Other keys come from the selected document.
+        let value = if machine_present && !merge_all {
+            json!({"env": files.get("env").cloned().unwrap_or_else(|| json!({}))})
+        } else {
+            files
+        };
+        result.push((format!("组织文件 · {}", names.join("；")), value));
+    }
+    if machine_present {
+        result.push((
+            "组织注册表 · HKLM\\SOFTWARE\\Policies\\ClaudeCode".into(),
+            machine.unwrap_or_else(|| json!({})),
+        ));
+    }
+    if !machine_present && !files_present {
+        if let Some(user) = user.filter(has_policy) {
+            result.push((
+                "组织注册表回退 · HKCU\\SOFTWARE\\Policies\\ClaudeCode".into(),
+                user,
+            ));
+        }
+    }
+    Ok(result)
+}
+
 fn policy_sources() -> Result<Vec<(String, Value)>, String> {
     let mut result = Vec::new();
     let mut inherited = json!({ "env": {} });
@@ -137,14 +270,7 @@ fn policy_sources() -> Result<Vec<(String, Value)>, String> {
             }
         }
     }
-    for path in managed_paths() {
-        if path.is_file() {
-            result.push((
-                format!("组织配置 · {}", path.display()),
-                read_settings(&path)?,
-            ));
-        }
-    }
+    result.extend(managed_sources()?);
     Ok(result)
 }
 
@@ -180,7 +306,7 @@ pub fn read_policy(data_dir: &Path) -> Result<PolicySnapshot, String> {
         channel: effective.get("autoUpdatesChannel").and_then(Value::as_str).unwrap_or("latest").into(),
         minimum_version: effective.get("minimumVersion").and_then(Value::as_str).map(str::to_owned),
         disabled_updates, sources,
-        detail: "依据当前用户、当前目录及可读取的组织配置推导。其他项目和服务器下发策略的实际效果以目标终端 claude doctor 结果为准。".into(),
+        detail: "依据当前用户、当前目录、组织文件及 HKLM/HKCU 组织策略推导。其他项目、服务器下发和策略辅助程序的实际效果以目标终端 claude doctor 结果为准。".into(),
     })
 }
 
@@ -240,8 +366,7 @@ pub fn preview_policy(request: &PolicyRequest) -> Result<PolicyChange, String> {
             after: (!version.is_empty()).then(|| Value::String(version.clone())),
         });
     }
-    for managed in managed_paths().into_iter().filter(|path| path.is_file()) {
-        let value = read_settings(&managed)?;
+    for (_, value) in managed_sources()? {
         if changes
             .iter()
             .any(|change| value.pointer(&change.pointer).is_some())
@@ -258,6 +383,7 @@ pub fn preview_policy(request: &PolicyRequest) -> Result<PolicyChange, String> {
         fields: changes,
         mode: request.mode.clone(),
         state: "planned".into(),
+        held_versions: BTreeMap::new(),
     })
 }
 
@@ -303,8 +429,7 @@ pub fn apply_policy(data_dir: &Path, change: &PolicyChange) -> Result<PolicyChan
     if storage::file_fingerprint(&path)? != change.expected_fingerprint {
         return Err("Claude 配置已被其他操作修改，请重新预览".into());
     }
-    for managed in managed_paths().into_iter().filter(|path| path.is_file()) {
-        let value = read_settings(&managed)?;
+    for (_, value) in managed_sources()? {
         if change
             .fields
             .iter()
@@ -385,6 +510,14 @@ pub fn restore_policy(data_dir: &Path, id: &str) -> Result<PolicyChange, String>
         return Err("配置在还原期间被修改，请重新检查".into());
     }
     write_settings(&path, &value)?;
+    let written = read_settings(&path)?;
+    if record
+        .fields
+        .iter()
+        .any(|field| written.pointer(&field.pointer).cloned() != field.before)
+    {
+        return Err("还原后配置字段再次发生变化，原变更记录已保留".into());
+    }
     record.state = "restored".into();
     storage::write_json(
         &storage::safe_record_path(&records_dir(data_dir), id)?,
@@ -455,5 +588,17 @@ mod tests {
             Some(json!("1"))
         )
         .is_err());
+    }
+
+    #[test]
+    fn managed_dropins_merge_nested_env_without_losing_policy_presence() {
+        let mut value = json!({"env":{"DISABLE_UPDATES":"1"}, "minimumVersion":"2.1.1"});
+        merge_readonly(&mut value, &json!({"env":{"DISABLE_AUTOUPDATER":"1"}}));
+        assert_eq!(value["env"]["DISABLE_UPDATES"], "1");
+        assert_eq!(value["minimumVersion"], "2.1.1");
+        assert!(has_policy(&value));
+        assert!(!has_policy(
+            &json!({"managedSourcesBehavior":"merge", "wslInheritsWindowsSettings":true})
+        ));
     }
 }

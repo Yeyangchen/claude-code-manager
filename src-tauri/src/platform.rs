@@ -78,15 +78,6 @@ pub fn is_elevated() -> Result<bool, String> {
 }
 
 #[cfg(windows)]
-pub fn hide_console(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    command.creation_flags(0x0800_0000);
-}
-
-#[cfg(not(windows))]
-pub fn hide_console(_command: &mut Command) {}
-
-#[cfg(windows)]
 pub fn expand_environment(value: &str) -> Result<String, String> {
     use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
     let value: Vec<u16> = value.encode_utf16().chain(Some(0)).collect();
@@ -111,21 +102,37 @@ pub fn expand_environment(value: &str) -> Result<String, String> {
 
 #[cfg(windows)]
 pub fn effective_path() -> Result<String, String> {
-    use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
+    use winreg::{
+        enums::{HKEY_LOCAL_MACHINE, REG_EXPAND_SZ, REG_SZ},
+        RegKey,
+    };
     let machine = RegKey::predef(HKEY_LOCAL_MACHINE)
         .open_subkey("SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment")
         .map_err(|e| format!("无法读取系统 PATH：{e}"))?;
     let system_raw = machine
         .get_raw_value("Path")
         .map_err(|e| format!("无法读取系统 PATH：{e}"))?;
+    if ![REG_SZ, REG_EXPAND_SZ].contains(&system_raw.vtype) {
+        return Err("系统 PATH 注册表类型无效".into());
+    }
     let system = crate::path_edit::decode_registry_string(&system_raw.bytes)?;
-    let user = crate::path_edit::read_user_path()?;
-    let combined = if user.exists && !user.value.is_empty() {
-        format!("{system};{}", user.value)
+    let system = if system_raw.vtype == REG_EXPAND_SZ {
+        expand_environment(&system)?
     } else {
         system
     };
-    expand_environment(&combined)
+    let user = crate::path_edit::read_user_path()?;
+    let user_value = if user.value_type == REG_EXPAND_SZ as u32 {
+        expand_environment(&user.value)?
+    } else {
+        user.value
+    };
+    let combined = if user.exists && !user_value.is_empty() {
+        format!("{system};{user_value}")
+    } else {
+        system
+    };
+    Ok(combined)
 }
 
 #[cfg(not(windows))]

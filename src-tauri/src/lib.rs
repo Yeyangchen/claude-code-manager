@@ -95,7 +95,7 @@ async fn export_diagnostics(
 ) -> AppResult<Option<serde_json::Value>> {
     use tauri_plugin_dialog::DialogExt;
     let manager = state.inner().clone();
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> Result<Option<serde_json::Value>, String> {
         let text = manager.diagnostics()?;
         let Some(file) = app
             .dialog()

@@ -1,0 +1,27 @@
+name: 缺陷报告
+description: 提交可复现的问题
+labels: [bug]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 现象与复现步骤
+      description: 说明实际结果与预期结果。
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 管理器版本与 Windows 版本
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Claude Code 安装来源
+      options: [Native, npm, WinGet, 多份安装, 不确定]
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 脱敏诊断
+      description: 使用应用内预览确认脱敏后粘贴，避免包含凭据或个人信息。

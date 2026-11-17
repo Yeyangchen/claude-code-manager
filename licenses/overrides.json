@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "packages": {
+    "cargo:alloc-stdlib@0.3.0": {
+      "note": "Workspace license at the crate publication commit.",
+      "evidence": [
+        "https://github.com/dropbox/rust-alloc-no-stdlib/tree/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/alloc-stdlib"
+      ],
+      "files": [
+        {
+          "file": "alloc-stdlib-LICENSE.txt",
+          "sourceURL": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE",
+          "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+        }
+      ]
+    },
+    "cargo:bitfields@1.0.3": {
+      "note": "Workspace license at the crate publication commit.",
+      "evidence": [
+        "https://github.com/gregorygaines/bitfields-rs/tree/a3c3d994c87c4f9cab566b3bbb5eb9bd1b2a9a98"
+      ],
+      "files": [
+        {
+          "file": "bitfields-LICENSE.txt",
+          "sourceURL": "https://raw.githubusercontent.com/gregorygaines/bitfields-rs/a3c3d994c87c4f9cab566b3bbb5eb9bd1b2a9a98/LICENSE",
+          "sha256": "20e54144e38eee8d67e970ab43fd4f124519931090ac015be8c7ff1a6b4a5f88"
+        }
+      ]
+    },
+    "cargo:bitfields-impl@1.0.3": {
+      "note": "Workspace license at the crate publication commit.",
+      "evidence": [
+        "https://github.com/gregorygaines/bitfields-rs/tree/a3c3d994c87c4f9cab566b3bbb5eb9bd1b2a9a98"
+      ],
+      "files": [
+        {
+          "file": "bitfields-LICENSE.txt",
+          "sourceURL": "https://raw.githubusercontent.com/gregorygaines/bitfields-rs/a3c3d994c87c4f9cab566b3bbb5eb9bd1b2a9a98/LICENSE",
+          "sha256": "20e54144e38eee8d67e970ab43fd4f124519931090ac015be8c7ff1a6b4a5f88"
+        }
+      ]
+    },
+    "cargo:tauri-plugin@2.7.3": {
+      "note": "Workspace dual-license texts at the crate publication commit.",
+      "evidence": [
+        "https://github.com/tauri-apps/tauri/tree/4acdc0a2230ced11567a90962b07eedfa53dc3d2/crates/tauri-plugin"
+      ],
+      "files": [
+        {
+          "file": "tauri-LICENSE-MIT.txt",
+          "sourceURL": "https://raw.githubusercontent.com/tauri-apps/tauri/4acdc0a2230ced11567a90962b07eedfa53dc3d2/LICENSE-MIT",
+          "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+        },
+        {
+          "file": "tauri-LICENSE-APACHE-2.0.txt",
+          "sourceURL": "https://raw.githubusercontent.com/tauri-apps/tauri/4acdc0a2230ced11567a90962b07eedfa53dc3d2/LICENSE-APACHE-2.0",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        }
+      ]
+    },
+    "cargo:webview2-com@0.39.1": {
+      "note": "Workspace license at the crate publication commit.",
+      "evidence": [
+        "https://github.com/wravery/webview2-rs/tree/edc2caf886175ccaebe86078c9cfe1ae2a187328"
+      ],
+      "files": [
+        {
+          "file": "webview2-com-LICENSE.txt",
+          "sourceURL": "https://raw.githubusercontent.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+        }
+      ]
+    },
+    "cargo:webview2-com-sys@0.39.1": {
+      "note": "Workspace license at the crate publication commit.",
+      "evidence": [
+        "https://github.com/wravery/webview2-rs/tree/edc2caf886175ccaebe86078c9cfe1ae2a187328"
+      ],
+      "files": [
+        {
+          "file": "webview2-com-LICENSE.txt",
+          "sourceURL": "https://raw.githubusercontent.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+        }
+      ]
+    },
+    "cargo:webview2-com-macros@0.8.1": {
+      "note": "Workspace license at the crate publication commit.",
+      "evidence": [
+        "https://github.com/wravery/webview2-rs/tree/dffa41a8a46d3f5565eefbff2de57d38d399f158"
+      ],
+      "files": [
+        {
+          "file": "webview2-com-macros-LICENSE.txt",
+          "sourceURL": "https://raw.githubusercontent.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+        }
+      ]
+    },
+    "cargo:selectors@0.38.0": {
+      "note": "The published source header explicitly applies MPL-2.0 and links to Mozilla. The package and its publication repository omit a standalone license file; the complete standard text is reproduced from the pinned SPDX license list.",
+      "evidence": [
+        "https://github.com/servo/stylo/blob/572ecba2d1600e7c3d490586692a209faf703baa/selectors/lib.rs",
+        "https://www.mozilla.org/MPL/2.0/"
+      ],
+      "files": [
+        {
+          "file": "standard-MPL-2.0.txt",
+          "sourceURL": "https://raw.githubusercontent.com/spdx/license-list-data/31846481de7ea17d92f2f46fad76abe58b2e9bb0/text/MPL-2.0.txt",
+          "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172"
+        }
+      ]
+    },
+    "cargo:crc24@0.1.6": {
+      "note": "The version 0.1.6 upstream Cargo.toml declares MIT/Apache-2.0. This distribution selects Apache-2.0. No license file was shipped; the complete standard text is reproduced from the pinned SPDX license list. Author attribution is retained from package metadata.",
+      "evidence": [
+        "https://github.com/sellibitze/crc24-rs/blob/f657c15d42a80f160712435ad6a486082b5c814e/Cargo.toml"
+      ],
+      "files": [
+        {
+          "file": "standard-Apache-2.0.txt",
+          "sourceURL": "https://raw.githubusercontent.com/spdx/license-list-data/31846481de7ea17d92f2f46fad76abe58b2e9bb0/text/Apache-2.0.txt",
+          "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff"
+        }
+      ]
+    },
+    "cargo:cx448@0.1.1": {
+      "note": "The publication Cargo.toml declares BSD-3-Clause, but neither the crate nor its publication repository includes a license file. Actual copyright lines are retained verbatim from source headers. The complete standard BSD-3-Clause text follows from the pinned SPDX license list; its generic template placeholders are not asserted to name this crate's authors.",
+      "evidence": [
+        "https://github.com/dignifiedquire/cx448/blob/58785c9ea154f646d03ccec4185f0a1ffa1c67e5/Cargo.toml"
+      ],
+      "files": [
+        {
+          "file": "cx448-macros-COPYRIGHT.txt",
+          "sourceURL": "https://raw.githubusercontent.com/dignifiedquire/cx448/58785c9ea154f646d03ccec4185f0a1ffa1c67e5/src/macros.rs",
+          "sha256": "fc3d186c863bb472c55175d832b7d219aa3a229c691c6b89a96e152a5dfa9150",
+          "sourceSha256": "907121c34fa807fad9c747fd38bcf97f4d934932f512f0d19aa79b3507af0e50",
+          "extraction": "Verbatim copyright lines 4-5; not a replacement license."
+        },
+        {
+          "file": "cx448-montgomery-COPYRIGHT.txt",
+          "sourceURL": "https://raw.githubusercontent.com/dignifiedquire/cx448/58785c9ea154f646d03ccec4185f0a1ffa1c67e5/src/curve/montgomery.rs",
+          "sha256": "1981215a8d88d6f6dec1cd25bed047c7f1852bb268a47fb86fdf260095d949f4",
+          "sourceSha256": "0f4928f25eeff937bde403645a050b81c47c5dd4090914d2dc2b2137fe652366",
+          "extraction": "Verbatim copyright lines 2-3; not a replacement license."
+        },
+        {
+          "file": "standard-BSD-3-Clause.txt",
+          "sourceURL": "https://raw.githubusercontent.com/spdx/license-list-data/31846481de7ea17d92f2f46fad76abe58b2e9bb0/text/BSD-3-Clause.txt",
+          "sha256": "5a93d5831e1297ab10fe643e1a631e83be392896da14ee2951285a79012df69d"
+        }
+      ]
+    }
+  }
+}

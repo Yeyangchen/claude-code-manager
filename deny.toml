@@ -1,0 +1,19 @@
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+
+[advisories]
+version = 2
+# Narrow verify-only exceptions; reassess on every dependency/use change.
+# All other advisories remain blocking. See docs/security-audit.md.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0387"]
+
+[licenses]
+version = 2
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "CC0-1.0", "MPL-2.0", "OpenSSL", "BSL-1.0", "CDLA-Permissive-2.0"]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

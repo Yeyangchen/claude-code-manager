@@ -1,0 +1,43 @@
+[package]
+name = "claude-code-manager"
+version = "0.1.0-beta.1"
+edition = "2021"
+rust-version = "1.90"
+license = "MIT"
+description = "Unofficial community version manager for Claude Code"
+authors = ["Yeyangchen"]
+
+[lib]
+name = "claude_code_manager"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.5", features = [] }
+
+[dependencies]
+tauri = { version = "2.12.6", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "socks"] }
+tokio = { version = "1", features = ["process", "time", "sync", "fs", "io-util", "macros"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
+semver = "1"
+url = "2"
+pgp = { version = "0.21.1", default-features = false }
+futures-util = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_Security", "Win32_Security_Credentials", "Win32_System_Environment", "Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

@@ -1,8 +1,8 @@
 import { t } from '../shared/i18n';
 import { version as appVersion } from '../../package.json';
 import { useCallback, useEffect, useState } from 'react';
-import { Activity, ArrowDownToLine, ArrowRight, Boxes, CircleHelp, Clock3, ExternalLink, LayoutDashboard, LoaderCircle, Monitor, RefreshCw, Settings2, Terminal, X } from 'lucide-react';
-import { Badge, Loading, Modal, Notice } from './components';
+import { Activity, ArrowDownToLine, ArrowRight, Boxes, CircleHelp, Clock3, ExternalLink, LayoutDashboard, LoaderCircle, Monitor, RefreshCw, Settings2, X } from 'lucide-react';
+import { Badge, BrandMark, Loading, Modal, Notice } from './components';
 import { useManager } from './useManager';
 import { errorMessage, previewMode } from '../services/manager';
 import type { ManagerApi } from '../services/manager';
@@ -111,10 +111,10 @@ export default function App({ api: injectedApi }: {
     }
     const activeTask = historyTask ?? operation;
     const plannedInstallation = snapshot?.installations.find((item) => item.id === plan?.installationId);
-    const retryable = activeTask && ['failed', 'cancelled', 'attention'].includes(activeTask.status) && ['install', 'update', 'reinstall', 'uninstall', 'path-repair'].includes(activeTask.kind);
+    const retryable = activeTask && ['failed', 'cancelled', 'attention'].includes(activeTask.status) && ['setup', 'install', 'update', 'reinstall', 'uninstall', 'path-repair'].includes(activeTask.kind);
     return <div className="app-shell">
     <aside className="sidebar">
-      <div className="brand"><div className="brand-mark"><Terminal size={22} strokeWidth={1.8}/></div><div><strong>Claude Code</strong><span>MANAGER</span></div></div>
+      <div className="brand"><BrandMark /><div><strong>Claude Code</strong><span>MANAGER</span></div></div>
       <div className="workspace-label">{t("工作空间")}</div>
       <nav aria-label={t("主导航")}>{(['overview', 'versions', 'environment', 'history'] as Page[]).map((key) => { const Icon = pages[key].icon; return <button key={key} className={`nav-item ${page === key ? 'active' : ''}`} onClick={() => setPage(key)} aria-current={page === key ? 'page' : undefined}><Icon size={18}/><span>{pages[key].label}</span>{key === 'environment' && snapshot && snapshot.checks.some((item) => item.level === 'warning' || item.level === 'error') && <span className="nav-notice" aria-label={t("有需要关注的环境检查")}/>}</button>; })}</nav>
       <div className="sidebar-spacer"/>
@@ -135,7 +135,7 @@ export default function App({ api: injectedApi }: {
           {(page === 'overview' || page === 'versions') && <div className="selection-bar"><label><span>{t("管理对象")}</span><select aria-label={t("管理对象")} value={selected?.id ?? ''} onChange={(event) => setSelectedId(event.target.value)}>{snapshot.installations.length ? snapshot.installations.map((item) => <option key={item.id} value={item.id}>{sourceNames[item.source]} · {item.version ?? t("版本未知")}{item.active ? t(" · 当前命中") : ''}</option>) : <option value="">{t("新建 Native 安装")}</option>}</select></label><span className="muted small">{catalog ? t("检查于 {value0}{value1}", { value0: displayDate(catalog.checkedAt), value1: catalog.cached ? t(" · 缓存") : '' }) : t("发布信息待查询")}</span></div>}
           {page === 'overview' && <Overview snapshot={snapshot} selected={selected} catalog={catalog} disabled={disabled} onPlan={(request) => void createPlan(request)} onNavigate={setPage}/>}
           {page === 'versions' && <Versions api={api} selected={selected} catalog={catalog} disabled={disabled} onPlan={(request) => void createPlan(request)} onError={onError}/>}
-          {page === 'environment' && <><div className="section-toolbar"><span className="muted">{t("检测上下文 ·")}{snapshot.environment.userName}</span><button className="button secondary small-button" disabled={scanning} onClick={() => void rescan()}><RefreshCw size={14} className={scanning ? 'spin' : ''}/>{scanning ? t("扫描中…") : t("重新扫描")}</button></div><Environment snapshot={snapshot} disabled={disabled} onPlan={(request) => void createPlan(request)} onDiagnostics={() => void inspectDiagnostics()}/></>}
+          {page === 'environment' && <><div className="section-toolbar"><span className="muted">{t("检测上下文 ·")} {snapshot.environment.userName}</span><button className="button secondary small-button" disabled={scanning} onClick={() => void rescan()}><RefreshCw size={14} className={scanning ? 'spin' : ''}/>{scanning ? t("扫描中…") : t("重新扫描")}</button></div><Environment snapshot={snapshot} disabled={disabled} onPlan={(request) => void createPlan(request)} onDiagnostics={() => void inspectDiagnostics()}/></>}
           {page === 'settings' && <Settings api={api} snapshot={snapshot} disabled={disabled} onPlan={(request) => void createPlan(request)} onSettingsSaved={(settings) => manager.setSnapshot({ ...snapshot, settings })} onError={onError} onOperationStarted={(next) => { manager.setOperation(next); setHistoryTask(null); setTaskOpen(true); }}/>}
           {page === 'history' && <History history={snapshot.history} onOpen={(task) => { setHistoryTask(task); setTaskOpen(true); }}/>}
           <footer className="content-footer"><span>{t("非官方社区工具，与 Anthropic 无隶属或背书关系。")}</span><button className="text-link" onClick={() => void inspectDiagnostics()}>{t("诊断信息")}<ArrowUpRightIcon /></button></footer>

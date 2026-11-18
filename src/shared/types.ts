@@ -102,7 +102,7 @@ export interface ReleaseCatalog {
 }
 
 export interface PlanRequest {
-  kind: 'install' | 'update' | 'reinstall' | 'uninstall' | 'path-repair' | 'policy' | 'restore-change';
+  kind: 'setup' | 'install' | 'update' | 'reinstall' | 'uninstall' | 'path-repair' | 'policy' | 'restore-change';
   installationId?: string;
   targetVersion?: string;
   channel?: 'latest' | 'stable';

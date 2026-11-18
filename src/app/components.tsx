@@ -5,6 +5,11 @@ import { AlertCircle, Check, Circle, LoaderCircle, X } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type { ManagerApi } from '../services/manager';
 import { safeHttpsUrl } from '../services/manager';
+import appIcon from '../../src-tauri/icons/128x128.png';
+/** The application icon, from the same source as the installer icons. */
+export function BrandMark() {
+    return <img className="brand-mark" src={appIcon} alt="" draggable={false}/>;
+}
 export function Panel({ title, action, children, className = '' }: PropsWithChildren<{
     title?: string;
     action?: ReactNode;

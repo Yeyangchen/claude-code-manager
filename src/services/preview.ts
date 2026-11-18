@@ -40,6 +40,15 @@ export const previewSnapshot: Snapshot = {
 };
 
 const snapshot = structuredClone(previewSnapshot);
+// `?state=empty` previews a machine where only Claude Desktop's private CLI exists.
+if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('state') === 'empty') {
+  snapshot.installations = [];
+  snapshot.shells = snapshot.shells.map((shell) => ({ ...shell, path: null, detail: '新进程未找到 claude 命令' }));
+  snapshot.checks = [
+    ...snapshot.checks.filter((check) => check.id !== 'duplicates'),
+    { id: 'claude-desktop', title: 'Claude 桌面应用', level: 'info', message: '检测到 Claude 桌面应用内置的 Claude Code 2.1.325。它只供桌面应用自身使用，不在终端 PATH 中，管理器不会修改它；在终端使用 claude 需要另外安装。' },
+  ];
+}
 const plans = new Map<string, { plan: Plan; request: PlanRequest }>();
 const changes: ChangeEntry[] = [];
 const listeners = new Set<(operation: Operation) => void>();
@@ -63,14 +72,16 @@ export const previewApi: ManagerApi = {
   }),
   createPlan: async (request) => {
     const installation = snapshot.installations.find((item) => item.id === request.installationId);
-    const titles: Record<string, string> = { install: '安装 Claude Code', update: '更新 Claude Code', reinstall: '重装指定版本', uninstall: '卸载安装实例', 'path-repair': '修复用户 PATH', policy: '更改更新策略', 'restore-change': '还原更改' };
+    const titles: Record<string, string> = { setup: '自动管理本机 Claude Code', install: '安装 Claude Code', update: '更新 Claude Code', reinstall: '重装指定版本', uninstall: '卸载安装实例', 'path-repair': '修复用户 PATH', policy: '更改更新策略', 'restore-change': '还原更改' };
     const plan: Plan = {
       id: crypto.randomUUID(), kind: request.kind, title: titles[request.kind],
       installationId: request.installationId ?? null, currentVersion: installation?.version ?? null,
-      targetVersion: request.targetVersion ?? (request.kind === 'install' || request.kind === 'update' ? '2.1.326' : null),
-      steps: ['核对目标安装和当前状态', '执行选定操作', '检查版本与终端命中关系'],
+      targetVersion: request.targetVersion ?? (['setup', 'install', 'update'].includes(request.kind) ? '2.1.326' : null),
+      steps: request.kind === 'setup'
+        ? ['复核安装和配置状态', '从官方来源下载并安装原生 Claude Code', '核验目标版本、SHA256 与 Windows 签名', '把原生安装目录加入用户 PATH', '通过新进程复核终端命中关系']
+        : ['核对目标安装和当前状态', '执行选定操作', '检查版本与终端命中关系'],
       warnings: ['开发预览只模拟任务，所有数据保存在当前页面内存中。'],
-      changes: request.kind === 'path-repair' ? [{ name: '用户 PATH', before: '%USERPROFILE%\\AppData\\Roaming\\npm', after: '%USERPROFILE%\\AppData\\Roaming\\npm;%USERPROFILE%\\.local\\bin' }] : [],
+      changes: request.kind === 'path-repair' || request.kind === 'setup' ? [{ name: '用户 PATH', before: '%USERPROFILE%\\AppData\\Roaming\\npm', after: '%USERPROFILE%\\AppData\\Roaming\\npm;%USERPROFILE%\\.local\\bin' }] : [],
       canExecute: true, manualCommand: null, checksumOnly: false,
     };
     plans.set(plan.id, { plan, request });
@@ -97,6 +108,10 @@ export const previewApi: ManagerApi = {
     window.setTimeout(() => {
       if (operation.status === 'cancelled') return;
       if (plan.kind === 'uninstall') snapshot.installations = snapshot.installations.filter((item) => item.id !== plan.installationId);
+      if (plan.kind === 'setup' && !snapshot.installations.some((item) => item.source === 'native')) {
+        snapshot.installations.unshift({ ...structuredClone(previewSnapshot.installations[0]), version: plan.targetVersion });
+        snapshot.shells = structuredClone(previewSnapshot.shells);
+      }
       if (plan.targetVersion) {
         const item = snapshot.installations.find((entry) => entry.id === plan.installationId);
         if (item) item.version = plan.targetVersion;

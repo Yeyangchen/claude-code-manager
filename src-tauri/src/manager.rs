@@ -20,6 +20,12 @@ enum Action {
         manifest: releases::VerifiedManifest,
     },
     Uninstall(Installation),
+    /// One-click setup: install the official native build when it is missing,
+    /// then make it reachable from new terminals through the user PATH.
+    Setup {
+        manifest: Option<releases::VerifiedManifest>,
+        path: Option<path_edit::PathChange>,
+    },
     Path(path_edit::PathChange),
     Policy(policy::PolicyChange),
     RestorePath(String),
@@ -413,6 +419,115 @@ impl Manager {
                 }
                 Action::Uninstall(install)
             }
+            "setup" => {
+                preview.title = "自动管理本机 Claude Code".into();
+                let native = discovery
+                    .installations
+                    .iter()
+                    .find(|i| i.source == Source::Native)
+                    .cloned();
+                if native.as_ref().is_some_and(|i| i.active) {
+                    return Err("原生 Claude Code 已安装，新终端已可直接使用".into());
+                }
+                let manifest = match native.as_ref() {
+                    Some(native) => {
+                        // PATH-only setup: no version transition is shown.
+                        preview.installation_id = Some(native.id.clone());
+                        preview.current_version = None;
+                        None
+                    }
+                    None => {
+                        let policy = policy::read_policy(&self.data_dir)?;
+                        if policy.disabled_updates {
+                            return Err(
+                                "DISABLE_UPDATES 已禁止安装和更新，请在设置来源中处理后重新检查"
+                                    .into(),
+                            );
+                        }
+                        validate_native_destination(&platform::user_home()?, true)?;
+                        let client = proxy::reqwest_client(&self.data_dir)?;
+                        let target = match request.target_version.as_deref() {
+                            Some(version) => releases::validate_version(version)?,
+                            None => {
+                                releases::channel(
+                                    &client,
+                                    request.channel.as_deref().unwrap_or(&policy.channel),
+                                )
+                                .await?
+                            }
+                        };
+                        if let Some(minimum) = policy
+                            .minimum_version
+                            .as_deref()
+                            .and_then(|v| semver::Version::parse(v).ok())
+                        {
+                            if semver::Version::parse(&target).map_err(|e| e.to_string())? < minimum
+                            {
+                                return Err(format!("目标版本低于生效的 minimumVersion {minimum}"));
+                            }
+                        }
+                        let checked = releases::manifest(&client, &target).await?;
+                        releases::windows_artifact(&checked.manifest, &discovery.environment.arch)?;
+                        preview.checksum_only = !checked.signed;
+                        if preview.checksum_only {
+                            preview
+                                .warnings
+                                .push("该历史版本仅提供 SHA256 摘要，安装前需明确确认。".into());
+                        }
+                        preview.changes.push(PlanChange {
+                            name: "Claude Code 版本".into(),
+                            before: "未安装".into(),
+                            after: target.clone(),
+                        });
+                        preview.steps.extend([
+                            "等待正在运行的原生 Claude Code 会话结束".into(),
+                            format!("从官方来源下载并安装原生 Claude Code {target}"),
+                            "核验目标版本、SHA256 与 Windows 签名".into(),
+                        ]);
+                        preview.target_version = Some(target);
+                        Some(checked)
+                    }
+                };
+                let mut path = path_edit::preview_append_native()?;
+                if path.before == path.after {
+                    // The native directory is already listed; it may sit behind
+                    // another recognized Claude Code directory.
+                    if let Some(native) = native.as_ref() {
+                        let directories = discovery
+                            .installations
+                            .iter()
+                            .filter(|i| i.source != Source::External)
+                            .filter_map(|i| Path::new(&i.path).parent().map(Path::to_path_buf))
+                            .collect::<Vec<_>>();
+                        let native_dir =
+                            Path::new(&native.path).parent().ok_or("安装路径无父目录")?;
+                        path = path_edit::preview_prefer(&directories, native_dir)?;
+                    }
+                }
+                let path = (path.before != path.after).then_some(path);
+                match path.as_ref() {
+                    Some(change) => {
+                        preview.changes.push(PlanChange {
+                            name: "HKCU Environment Path".into(),
+                            before: change.before.value.clone(),
+                            after: change.after.value.clone(),
+                        });
+                        preview.steps.extend([
+                            "保存用户 PATH 原值，并登记可撤销记录".into(),
+                            "把原生安装目录设为用户 PATH 中的 Claude Code 入口".into(),
+                        ]);
+                    }
+                    None if manifest.is_none() => {
+                        return Err("用户 PATH 已指向原生安装。终端仍命中其他位置，可能来自系统级 PATH，请在环境页查看命中关系".into());
+                    }
+                    None => {}
+                }
+                preview.steps.push("通过新进程复核终端命中关系".into());
+                preview
+                    .warnings
+                    .push("已打开的终端需要重新启动。Claude 桌面应用内置的 CLI 不受影响。".into());
+                Action::Setup { manifest, path }
+            }
             "path-repair" => {
                 preview.title = "修复用户级 PATH".into();
                 let change = if let Some(install) = installation {
@@ -601,7 +716,7 @@ impl Manager {
             .map_err(|_| "任务状态锁异常")?
             .operations
             .iter()
-            .filter(|o| o.phase == "recovering")
+            .filter(|o| is_interrupted(o))
             .filter_map(|o| o.child_pid)
             .collect::<Vec<_>>();
         for pid in interrupted {
@@ -640,13 +755,17 @@ impl Manager {
                 operation.cancellable = false;
             }
         }
+        // Only tasks that never reached a terminal update were interrupted. A
+        // task that failed normally also uses the "recovering" phase, but it
+        // already carries its finish time and the real failure reason, which
+        // must not be replaced by a generic recovery message.
         let interrupted = self
             .history
             .lock()
             .map_err(|_| "任务状态锁异常")?
             .operations
             .iter()
-            .filter(|o| o.phase == "recovering")
+            .filter(|o| is_interrupted(o))
             .cloned()
             .collect::<Vec<_>>();
         let mut changed = false;
@@ -929,6 +1048,46 @@ impl Manager {
                 .await
                 .map_err(|e| e.to_string())?
             }
+            Action::Setup { manifest, path } => {
+                let mut summary = Vec::new();
+                if let Some(manifest) = manifest {
+                    let installed = self.install(app, id, None, manifest, cancelled).await?;
+                    summary.push(installed.replace(PATH_HINT, "").trim().to_string());
+                }
+                if let Some(change) = path {
+                    self.update_operation(app, id, |o| {
+                        o.phase = "applying".into();
+                        o.cancellable = false;
+                    });
+                    let current = path_edit::read_user_path()?;
+                    if current == change.before {
+                        path_edit::apply_change(&self.data_dir, &change)?;
+                        summary.push("用户 PATH 已更新，并保存了可撤销记录。".to_string());
+                    } else if current != change.after {
+                        return Err(format!(
+                            "{}用户 PATH 在执行期间被其他程序修改，未自动写入。请在环境页重新预览 PATH 修复。",
+                            summary.first().map(|s| format!("{s} ")).unwrap_or_default()
+                        ));
+                    }
+                }
+                let after = self.discovery(true)?;
+                match after
+                    .installations
+                    .iter()
+                    .find(|i| i.source == Source::Native)
+                {
+                    Some(native) if native.active => summary.push(
+                        "新打开的终端会直接使用此安装，后续版本由管理器检查。请重新打开已有终端。"
+                            .to_string(),
+                    ),
+                    Some(_) => summary.push(
+                        "新终端仍优先命中其他位置（可能来自系统级 PATH），请在环境页查看命中关系。"
+                            .to_string(),
+                    ),
+                    None => return Err("复核未发现原生安装，请查看任务日志后重试".into()),
+                }
+                Ok(summary.join(" "))
+            }
             Action::Path(change) => {
                 self.update_operation(app, id, |o| {
                     o.phase = "applying".into();
@@ -1207,7 +1366,7 @@ impl Manager {
             let mut message = format!("已安装并验证 Claude Code {version}。");
             let report = manager.doctor_report(actual).unwrap_or_else(|error| error);
             manager.update_operation(&verify_app, &verify_id, |o| o.messages.push(report));
-            if !actual.active { message.push_str(" 当前 PowerShell 命中其他路径，请在环境页处理 PATH。"); }
+            if !actual.active { message.push_str(PATH_HINT); }
             if exit_code != 0 { message.push_str(&format!(" 安装器返回 {exit_code}，目标版本已通过独立验证。")); }
             Ok(message)
         }).await.map_err(|e| e.to_string())?
@@ -1607,6 +1766,12 @@ impl Manager {
     }
 }
 
+const PATH_HINT: &str = " 当前 PowerShell 命中其他路径，请在环境页处理 PATH。";
+
+fn is_interrupted(operation: &Operation) -> bool {
+    operation.phase == "recovering" && operation.finished_at.is_none()
+}
+
 fn timestamp(milliseconds: u64) -> String {
     chrono::DateTime::from_timestamp_millis(milliseconds.min(i64::MAX as u64) as i64)
         .map(|t| t.to_rfc3339())
@@ -1836,6 +2001,71 @@ mod tests {
             bytes
         );
         drop(guard);
+    }
+
+    fn fixture_operation(id: &str, phase: &str, finished: bool, result: &str) -> Operation {
+        Operation {
+            id: id.into(),
+            kind: "update".into(),
+            title: "fixture".into(),
+            phase: phase.into(),
+            status: "attention".into(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            finished_at: finished.then(|| chrono::Utc::now().to_rfc3339()),
+            messages: vec![],
+            cancellable: false,
+            progress: None,
+            result: Some(result.into()),
+            installation_id: None,
+            target_version: Some("2.1.326".into()),
+            child_pid: None,
+        }
+    }
+
+    fn empty_discovery() -> discovery::Discovery {
+        discovery::Discovery {
+            environment: Environment {
+                os: "fixture".into(),
+                arch: "x64".into(),
+                user_name: "fixture".into(),
+                elevated: false,
+                config_dir: String::new(),
+                supported: true,
+            },
+            installations: vec![],
+            shells: vec![],
+            checks: vec![],
+        }
+    }
+
+    #[test]
+    fn recovery_keeps_the_reason_of_a_finished_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = Manager::new(directory.path().to_path_buf()).unwrap();
+        {
+            let mut history = manager.history.lock().unwrap();
+            history.operations.push(fixture_operation(
+                "failed",
+                "recovering",
+                true,
+                "官方 manifest 签名验证失败",
+            ));
+            history.operations.push(fixture_operation(
+                "interrupted",
+                "recovering",
+                false,
+                "上次任务中断。",
+            ));
+        }
+        manager.persist_history().unwrap();
+        manager.recover_interrupted(&empty_discovery()).unwrap();
+        let failed = manager.operation("failed").unwrap();
+        assert_eq!(failed.phase, "recovering");
+        assert_eq!(failed.result.as_deref(), Some("官方 manifest 签名验证失败"));
+        let interrupted = manager.operation("interrupted").unwrap();
+        assert_eq!(interrupted.phase, "recovered");
+        assert!(interrupted.finished_at.is_some());
+        assert_ne!(interrupted.result.as_deref(), Some("上次任务中断。"));
     }
 
     #[test]

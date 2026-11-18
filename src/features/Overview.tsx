@@ -1,5 +1,5 @@
 import { t } from '../shared/i18n';
-import { ArrowDownToLine, ArrowRight, CircleCheck, Clock3, PackageCheck, ShieldCheck, Terminal } from 'lucide-react';
+import { ArrowDownToLine, ArrowRight, CircleCheck, Clock3, PackageCheck, ShieldCheck, Terminal, WandSparkles, Wrench } from 'lucide-react';
 import { Badge, Empty, Notice, Panel } from '../app/components';
 import { displayDate, policyNames, sourceNames } from '../shared/format';
 import type { Installation, PlanRequest, ReleaseCatalog, Snapshot } from '../shared/types';
@@ -18,9 +18,28 @@ export function Overview({ snapshot, selected, catalog, disabled, onPlan, onNavi
     const hasTarget = Boolean(target && target !== current);
     const warnings = snapshot.checks.filter((check) => check.level === 'warning' || check.level === 'error');
     const holdDrift = warnings.find((check) => check.id === 'hold-version-drift');
+    // Like a first-run takeover: with no terminal-usable install, one action
+    // installs the official native build and wires it into the user PATH.
+    const manageable = snapshot.installations.filter((item) => item.source !== 'external');
+    const native = manageable.find((item) => item.source === 'native');
+    const unmanaged = manageable.length === 0;
+    const pathOnly = Boolean(native && !native.active && !manageable.some((item) => item.active));
+    const desktopCli = snapshot.checks.find((check) => check.id === 'claude-desktop');
     return <div className="page-stack">
     {holdDrift && <Notice tone="warning"><strong>{holdDrift.title}</strong><p>{holdDrift.message}</p></Notice>}
-    <section className="hero-panel">
+    {unmanaged ? <section className="hero-panel">
+      <div className="hero-top"><div className="hero-label"><Terminal size={17}/> CLAUDE CODE</div><Badge tone="accent">{t("等待接管")}</Badge></div>
+      <div className="hero-main">
+        <div><div className="eyebrow">{t("本机终端")}</div><div className="version-large">{t("尚未安装")}</div>
+          <p className="hero-description">{t("一键安装官方原生版本，加入终端 PATH 并完成验证，之后由管理器负责检查与更新。")}</p>
+        </div>
+        <div className="hero-action">
+          <button className="button primary hero-cta" disabled={disabled} onClick={() => onPlan({ kind: 'setup', targetVersion: target })}><WandSparkles size={18}/>{t("一键自动管理")}</button>
+          <button className="text-link" onClick={() => onNavigate('versions')}>{t("选择其他版本")}<ArrowRight size={15}/></button>
+        </div>
+      </div>
+      <div className="hero-bottom"><span><CircleCheck size={15}/>{t("未发现终端可用的 Claude Code")}</span><span>{target ? t("官方 {value0} · v{value1}", { value0: snapshot.policy.channel, value1: target }) : t("正在查询发布通道")}</span></div>
+    </section> : <section className="hero-panel">
       <div className="hero-top"><div className="hero-label"><Terminal size={17}/> CLAUDE CODE</div><Badge tone={selected ? 'success' : 'neutral'}>{selected ? t("已发现安装") : t("等待安装")}</Badge></div>
       <div className="hero-main">
         <div><div className="eyebrow">{t("当前选择的版本")}</div><div className="version-large">{current ? <><span>v</span>{current}</> : selected ? t("版本未知") : t("尚未安装")}</div>
@@ -34,7 +53,9 @@ export function Overview({ snapshot, selected, catalog, disabled, onPlan, onNavi
         </div>
       </div>
       <div className="hero-bottom"><span><CircleCheck size={15}/>{selected?.active ? t("当前终端命中此安装") : selected ? t("终端命中情况见环境页") : t("未发现可管理的安装")}</span><span>{target ? t("官方 {value0} · v{value1}", { value0: snapshot.policy.channel, value1: target }) : t("正在查询发布通道")}</span></div>
-    </section>
+    </section>}
+    {unmanaged && desktopCli && <Notice>{desktopCli.message} {t("「一键自动管理」会另外安装一份终端可用的官方版本，不会改动桌面应用。")}</Notice>}
+    {pathOnly && <div className="notice notice-warning setup-notice"><Wrench size={17}/><div><strong>{t("已安装原生 Claude Code，但新终端还找不到它")}</strong><p>{t("一键修复会把原生安装目录设为用户 PATH 中的 Claude Code 入口，并保存可撤销记录。")}</p></div><button className="button secondary small-button" disabled={disabled} onClick={() => onPlan({ kind: 'setup' })}>{t("一键修复")}</button></div>}
     {needsRepair && <Notice>{t("已发现安装文件，但无法读取版本。重新安装前会复核该实例及官方产物。")}</Notice>}
 
     <div className="summary-grid">
